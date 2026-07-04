@@ -24,18 +24,30 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
+    if not 0 < args.val_ratio < 1:
+        raise ValueError("--val_ratio phai nam trong khoang (0, 1)")
+
     random.seed(args.seed)
 
     img_dir = os.path.join(args.src_dir, "images")
     lbl_dir = os.path.join(args.src_dir, "labels")
 
+    if not os.path.isdir(img_dir):
+        raise FileNotFoundError(f"Khong tim thay thu muc images: {img_dir}")
+    if not os.path.isdir(lbl_dir):
+        raise FileNotFoundError(f"Khong tim thay thu muc labels: {lbl_dir}")
+
     files = [f for f in os.listdir(img_dir) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+    if not files:
+        raise ValueError(f"Khong co anh nao trong: {img_dir}")
+
     random.shuffle(files)
 
     n_val = max(1, int(len(files) * args.val_ratio))
     val_files = set(files[:n_val])
     train_files = files[n_val:]
 
+    missing_labels = []
     for split_name, split_files in [("train", train_files), ("val", val_files)]:
         os.makedirs(os.path.join(args.dst_dir, split_name, "images"), exist_ok=True)
         os.makedirs(os.path.join(args.dst_dir, split_name, "labels"), exist_ok=True)
@@ -44,8 +56,12 @@ def main():
             shutil.copy(os.path.join(img_dir, fname),
                         os.path.join(args.dst_dir, split_name, "images", fname))
             lbl_src = os.path.join(lbl_dir, base + ".txt")
+            lbl_dst = os.path.join(args.dst_dir, split_name, "labels", base + ".txt")
             if os.path.exists(lbl_src):
-                shutil.copy(lbl_src, os.path.join(args.dst_dir, split_name, "labels", base + ".txt"))
+                shutil.copy(lbl_src, lbl_dst)
+            else:
+                missing_labels.append(fname)
+                open(lbl_dst, "w").close()
 
     yaml_path = os.path.join(args.dst_dir, "data.yaml")
     with open(yaml_path, "w") as f:
@@ -58,6 +74,8 @@ def main():
 
     print(f"Train: {len(train_files)} anh | Val: {len(val_files)} anh")
     print(f"Da tao data.yaml tai: {yaml_path}")
+    if missing_labels:
+        print(f"[warn] Co {len(missing_labels)} anh thieu label; da tao file .txt rong.")
 
 
 if __name__ == "__main__":

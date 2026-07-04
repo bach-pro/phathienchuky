@@ -5,7 +5,7 @@ Chạy model đã train trên 1 ảnh cụ thể, vẽ bounding box + tên lớp
 hiển thị bằng matplotlib và lưu ảnh kết quả ra file.
 
 CÁCH DÙNG:
-    python predict_single_image.py --weights runs\\detect\\runs_signature\\yolov8_sig_stamp-4\\weights\\best.pt --image test/image-copy-2.png --conf 0.15 --imgsz 1024
+    python predict_single_image.py --weights runs\\detect\\runs_signature\\yolov8_sig_stamp-9\\weights\\best.pt --image test/image-copy-2.png --conf 0.15 --imgsz 1024
 
 Tham số hữu ích:
     --conf 0.15   Giảm ngưỡng confidence nếu muốn ưu tiên recall (đỡ bỏ sót chữ ký),

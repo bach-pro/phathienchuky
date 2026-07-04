@@ -1,3 +1,8 @@
 dataset/
 dataset_split/
 runs/
+signatures_dir/
+signatures_dir_split/
+signatures/
+__pycache__/
+documents/

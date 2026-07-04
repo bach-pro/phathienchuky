@@ -38,7 +38,7 @@ def main():
     parser.add_argument("--device", type=str, default=0,
                           help="'0' = GPU dau tien, '0,1' = 2 GPU, 'cpu' = ep dung CPU. "
                               "Neu khong truyen, Ultralytics tu chon GPU neu co san.")
-    parser.add_argument("--workers", type=int, default=8,
+    parser.add_argument("--workers", type=int, default=4,
                           help="So luong dataloader worker. Tang len khi dung GPU de "
                               "tranh GPU bi 'doi' du lieu (bottleneck o CPU/disk).")
     args = parser.parse_args()

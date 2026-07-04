@@ -5,11 +5,11 @@ Sinh dữ liệu tổng hợp (synthetic) cho bài toán phát hiện CHỮ KÝ 
 CON DẤU (stamp) trên ảnh chứng từ (phiếu thu/chi, hoá đơn), có chủ động tạo ra
 các trường hợp con dấu đè lên chữ ký (occlusion) để model học tốt case khó này.
 
-Output: ảnh .jpg + nhãn YOLO format (.txt) trong thư mục dataset/images, dataset/labels
+Output: ảnhr .jpg + nhãn YOLO fomat (.txt) trong thư mục dataset/images, dataset/labels
 Class id: 0 = signature, 1 = stamp
 
 CÁCH DÙNG NHANH:
-    python generate_dataset.py --num_samples 2000 --out_dir dataset
+    python generate_dataset.py --num_samples 2000 --out_dir dataset --signatures_dir signatures_dir
 
 CHUẨN BỊ DỮ LIỆU ĐẦU VÀO (khuyến nghị để chất lượng thật hơn):
     - Tải chữ ký thật từ CEDAR / GPDS / ICDAR SigComp, để các ảnh .png/.jpg
@@ -336,27 +336,26 @@ def compose_sample(bg_size=(1000, 1400), signatures_pool=None):
 # ----------------------------------------------------------------------------
 
 def apply_scan_augmentation(pil_img):
-    """Mô phỏng các artifact thường gặp khi scan/photocopy chứng từ thật."""
+    """
+    Mô phỏng artifact scan/photocopy không làm thay đổi hình học ảnh.
+
+    Lưu ý: bbox đã được tạo trước khi gọi hàm này. Vì vậy không xoay/skew/crop
+    toàn ảnh ở đây, nếu không nhãn YOLO sẽ bị lệch. Các augmentation hình học
+    nên để Ultralytics xử lý trong train.py vì thư viện sẽ biến đổi bbox cùng ảnh.
+    """
     img = np.array(pil_img.convert("RGB"))
 
-    # 1. Nghiêng trang nhẹ (skew toàn ảnh)
-    if random.random() < 0.5:
-        angle = random.uniform(-2.5, 2.5)
-        h, w = img.shape[:2]
-        M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
-        img = cv2.warpAffine(img, M, (w, h), borderValue=(255, 255, 255))
-
-    # 2. Nhiễu hạt kiểu scan
+    # 1. Nhiễu hạt kiểu scan
     if random.random() < 0.6:
         noise = np.random.normal(0, random.uniform(3, 10), img.shape).astype(np.int16)
         img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
-    # 3. Làm mờ nhẹ (mô phỏng photocopy/out of focus)
+    # 2. Làm mờ nhẹ (mô phỏng photocopy/out of focus)
     if random.random() < 0.4:
         k = random.choice([3, 5])
         img = cv2.GaussianBlur(img, (k, k), 0)
 
-    # 4. Giảm tương phản nhẹ / ánh sáng không đều (mô phỏng scan ám vàng, thiếu sáng)
+    # 3. Giảm tương phản nhẹ / ánh sáng không đều (mô phỏng scan ám vàng, thiếu sáng)
     if random.random() < 0.3:
         alpha = random.uniform(0.85, 1.05)
         beta = random.uniform(-10, 10)
@@ -364,7 +363,7 @@ def apply_scan_augmentation(pil_img):
 
     out = Image.fromarray(img)
 
-    # 5. Nén JPEG artifact (lưu rồi đọc lại với quality thấp)
+    # 4. Nén JPEG artifact (lưu rồi đọc lại với quality thấp)
     if random.random() < 0.5:
         import io
         buf = io.BytesIO()
@@ -433,10 +432,13 @@ def main():
         if (i + 1) % 100 == 0:
             print(f"Da sinh {i + 1}/{args.num_samples} samples")
 
-    # Ghi file data.yaml cho YOLO
-    yaml_path = os.path.join(args.out_dir, "data.yaml")
+    # Ghi file YAML tham khảo cho dataset CHƯA split. Không dùng file này để train
+    # vì train/val sẽ trỏ cùng thư mục và làm metric validation bị ảo.
+    yaml_path = os.path.join(args.out_dir, "data_unsplit_DO_NOT_TRAIN.yaml")
     with open(yaml_path, "w") as f:
         f.write(
+            "# Dataset chua split: KHONG dung file nay de train/validate.\n"
+            "# Hay chay split_dataset.py de tao data.yaml rieng cho train/val.\n"
             f"path: {os.path.abspath(args.out_dir)}\n"
             f"train: images\n"
             f"val: images\n"
@@ -444,9 +446,11 @@ def main():
         )
 
     print(f"\nHoan tat. Dataset tai: {os.path.abspath(args.out_dir)}")
-    print(f"File cau hinh YOLO: {yaml_path}")
-    print("Train thu voi Ultralytics YOLO, vi du:")
-    print(f"  yolo detect train data={yaml_path} model=yolov8n.pt imgsz=1024 epochs=50")
+    print(f"File tham khao dataset chua split: {yaml_path}")
+    print("Buoc tiep theo nen lam:")
+    print(f"  python split_dataset.py --src_dir {args.out_dir} --dst_dir {args.out_dir}_split --val_ratio 0.15")
+    print("Sau do train voi file data.yaml da split, vi du:")
+    print(f"  yolo detect train data={args.out_dir}_split/data.yaml model=yolov8n.pt imgsz=1024 epochs=50")
 
 
 if __name__ == "__main__":
