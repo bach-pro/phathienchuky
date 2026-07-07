@@ -1,0 +1,46 @@
+{
+  "image": "test/aaa.png",
+  "image_width": 1380,
+  "image_height": 1832,
+  "coordinate_space": "original_image_pixels_xyxy",
+  "inference": {
+    "imgsz": 1024,
+    "conf": 0.1,
+    "max_det": 300,
+    "roi_box_xyxy": [
+      0,
+      916,
+      1380,
+      1832
+    ],
+    "tile_size": 0,
+    "tile_overlap": 0.2,
+    "nms_iou": 0.5
+  },
+  "detections": [
+    {
+      "class_id": 0,
+      "class_name": "signature",
+      "confidence": 0.8917959332466125,
+      "box_xyxy": [
+        145,
+        1339,
+        298,
+        1443
+      ],
+      "crop_path": "prediction_crops\\aaa_000_signature_0.89_145_1339_298_1443.jpg"
+    },
+    {
+      "class_id": 0,
+      "class_name": "signature",
+      "confidence": 0.7658951282501221,
+      "box_xyxy": [
+        471,
+        1320,
+        685,
+        1487
+      ],
+      "crop_path": "prediction_crops\\aaa_001_signature_0.77_471_1320_685_1487.jpg"
+    }
+  ]
+}

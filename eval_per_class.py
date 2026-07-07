@@ -12,7 +12,7 @@ eval_per_class.py
     riêng nếu recall signature thấp hơn ngưỡng chấp nhận được.
 
 CACH DUNG:
-    python eval_per_class.py --weights runs\\detect\\runs_signature\\yolov8_sig_stamp-4\\weights\\best.pt --data dataset_split/data.yaml
+    python eval_per_class.py --weights runs\\detect\\runs_signature\\yolov8_sig_stamp-9\\weights\\best.pt --data dataset_split/data.yaml
 """
 
 import argparse

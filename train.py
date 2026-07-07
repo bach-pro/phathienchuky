@@ -1,12 +1,12 @@
 """
 train.py
 =========
-Train model YOLOv8 phát hiện signature/stamp trên ảnh chứng từ.
+Train model YOLO11 phát hiện signature/stamp trên ảnh chứng từ.
 
 Các lựa chọn cấu hình trong script này được chọn RIÊNG cho đặc thù bài toán:
   - imgsz=1024 (thay vi mac dinh 640): vi signature/stamp la object nho so voi
     ca trang tai lieu, giam resolution se lam mat chi tiet net chu ky mong.
-  - model mac dinh yolov8s (khong phai n) de co du capacity phan biet net chu ky
+  - model mac dinh yolo11s (khong phai n) de co du capacity phan biet net chu ky
     mong voi nen/duong ke bang; neu can nhe hon cho production co the đổi 'n'.
   - patience cao hon mac dinh vi dataset synthetic hoi "de" luc dau, tranh early
     stop qua som truoc khi model on dinh tren cac case kho (overlap).
@@ -26,19 +26,19 @@ from ultralytics import YOLO
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, required=True, help="Duong dan data.yaml")
-    parser.add_argument("--model", type=str, default="yolov8s.pt",
+    parser.add_argument("--model", type=str, default="yolo11s.pt",
                           help="Pretrained weight khoi tao (transfer learning). "
-                              "Dung yolov8n.pt neu can nhe/nhanh hon cho production.")
+                              "Dung yolo11n.pt neu can nhe/nhanh hon cho production.")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--imgsz", type=int, default=1024)
     parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--patience", type=int, default=30)
     parser.add_argument("--project", type=str, default="runs_signature")
-    parser.add_argument("--name", type=str, default="yolov8_sig_stamp")
-    parser.add_argument("--device", type=str, default=0,
+    parser.add_argument("--name", type=str, default="yolo11_sig_stamp")
+    parser.add_argument("--device", type=str, default="0",
                           help="'0' = GPU dau tien, '0,1' = 2 GPU, 'cpu' = ep dung CPU. "
                               "Neu khong truyen, Ultralytics tu chon GPU neu co san.")
-    parser.add_argument("--workers", type=int, default=8,
+    parser.add_argument("--workers", type=int, default=4,
                           help="So luong dataloader worker. Tang len khi dung GPU de "
                               "tranh GPU bi 'doi' du lieu (bottleneck o CPU/disk).")
     args = parser.parse_args()
