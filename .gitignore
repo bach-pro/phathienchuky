@@ -6,3 +6,7 @@ signatures_dir_split/
 signatures/
 __pycache__/
 documents/
+dataset_documents_multisig_split/
+dataset_documents_multisig/
+real_test/
+*.pt

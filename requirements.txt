@@ -1,0 +1,8 @@
+# Core dependencies for YOLO signature/stamp detection.
+ultralytics
+opencv-python
+numpy
+Pillow
+matplotlib
+torch
+torchvision
