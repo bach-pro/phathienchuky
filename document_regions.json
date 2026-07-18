@@ -11,13 +11,6 @@
     ]
   },
   "documents": {
-    "doc1.jpg": {
-      "signature_zones": [
-        [0.28, 0.90, 0.52, 0.995],
-        [0.72, 0.90, 0.96, 0.995]
-      ],
-      "stamp_zones": []
-    },
     "doc2.jpg": {
       "signature_zones": [
         [0.10, 0.90, 0.27, 0.995],

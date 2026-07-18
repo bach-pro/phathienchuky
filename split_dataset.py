@@ -5,7 +5,7 @@ Chia dataset sinh ra từ generate_dataset.py (thư mục images/ + labels/ chun
 thành cấu trúc chuẩn YOLO: train/ và val/ riêng biệt, kèm data.yaml tương ứng.
 
 CÁCH DÙNG:
-    python split_dataset.py --src_dir dataset --dst_dir dataset_split --val_ratio 0.15
+    uv run split_dataset.py --src_dir dataset --dst_dir dataset_split --val_ratio 0.15
 """
 
 import os

@@ -8,10 +8,10 @@ CSV cac false negative / false positive va gan nhom loi de biet can bo sung du
 lieu nao cho vong train tiep theo.
 
 Vi du:
-    python analyze_errors.py --weights runs_signature/sweep_yolo11s_imgsz1024/weights/best.pt --data real_test/data.yaml --split test --imgsz 1280 --conf 0.15 --save_crops error_crops
+    uv run analyze_errors.py --weights runs_signature/sweep_yolo11s_imgsz1024/weights/best.pt --data real_test/data.yaml --split test --imgsz 1280 --conf 0.15 --save_crops error_crops
 
 Hoac truyen truc tiep folder:
-    python analyze_errors.py --weights best.pt --images_dir real_test/images --labels_dir real_test/labels
+    uv run analyze_errors.py --weights best.pt --images_dir real_test/images --labels_dir real_test/labels
 """
 
 import argparse
@@ -98,6 +98,8 @@ def load_yolo_labels(label_path, img_w, img_h):
 
 def result_to_predictions(result, conf_threshold):
     preds = []
+    if result is None:
+        return preds
     boxes = result.boxes
     if boxes is None:
         return preds
@@ -275,7 +277,10 @@ def main():
             max_det=args.max_det,
             verbose=False,
         )
-        pred_items = result_to_predictions(results[0], args.conf)
+        # Ultralytics thuong tra ve list[Results], nhung mot so phien ban/che do
+        # co the tra ve iterator. Khong gia dinh results luon co phan tu [0].
+        first_result = next(iter(results), None) if results is not None else None
+        pred_items = result_to_predictions(first_result, args.conf)
         total_pred_boxes += len(pred_items)
         matched_gt, matched_pred = match_predictions(gt_items, pred_items, args.iou)
         matched_count += len(matched_gt)

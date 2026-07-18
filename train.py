@@ -1,7 +1,7 @@
 """
 train.py
 =========
-Train model YOLO11 phát hiện signature/stamp trên ảnh chứng từ.
+Train model YOLO26 phát hiện signature/stamp trên ảnh chứng từ.
 
 Các lựa chọn cấu hình trong script này được chọn RIÊNG cho đặc thù bài toán:
   - imgsz=1024 (thay vi mac dinh 640): vi signature/stamp la object nho so voi
@@ -16,7 +16,7 @@ Các lựa chọn cấu hình trong script này được chọn RIÊNG cho đặ
         se pha vo vi tri "hop ly" cua chu ky (thuong o cuoi trang)
 
 CACH DUNG:
-    python train.py --data dataset_split/data.yaml --epochs 100 --imgsz 1024
+    uv run train.py --data dataset_split/data.yaml --epochs 40 --imgsz 1024 
 """
 
 import argparse
@@ -26,15 +26,15 @@ from ultralytics import YOLO
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, required=True, help="Duong dan data.yaml")
-    parser.add_argument("--model", type=str, default="yolo11s.pt",
+    parser.add_argument("--model", type=str, default="yolo26s.pt",
                           help="Pretrained weight khoi tao (transfer learning). "
-                              "Dung yolo11n.pt neu can nhe/nhanh hon cho production.")
+                              "Dung yolo26s.pt neu can nhe/nhanh hon cho production.")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--imgsz", type=int, default=1024)
-    parser.add_argument("--batch", type=int, default=4)
+    parser.add_argument("--batch", type=int, default=-1, help="Batch size. Neu khong truyen, Ultralytics tu chon batch size toi uu.")
     parser.add_argument("--patience", type=int, default=30)
     parser.add_argument("--project", type=str, default="runs_signature")
-    parser.add_argument("--name", type=str, default="yolo11_sig_stamp")
+    parser.add_argument("--name", type=str, default="yolo26_sig_stamp")
     parser.add_argument("--device", type=str, default="0",
                           help="'0' = GPU dau tien, '0,1' = 2 GPU, 'cpu' = ep dung CPU. "
                               "Neu khong truyen, Ultralytics tu chon GPU neu co san.")

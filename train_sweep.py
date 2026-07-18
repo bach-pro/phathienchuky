@@ -4,10 +4,10 @@ train_sweep.py
 Chay lan luot nhieu cau hinh train de so sanh tren cung dataset.
 
 Vi du baseline theo lo trinh:
-    python train_sweep.py --data dataset_documents_multisig_split/data.yaml --epochs 100 --batch 4
+    uv run train_sweep.py --data dataset_documents_multisig_split/data.yaml --epochs 100 --batch 4
 
 Xem truoc lenh, chua train:
-    python train_sweep.py --data dataset_documents_multisig_split/data.yaml --dry_run
+    uv run train_sweep.py --data dataset_documents_multisig_split/data.yaml --dry_run
 """
 
 import argparse

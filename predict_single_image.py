@@ -5,15 +5,15 @@ Chạy model đã train trên 1 ảnh cụ thể, vẽ bounding box + tên lớp
 luu anh ket qua dung kich thuoc anh goc, va co the cat crop tu anh goc.
 
 CÁCH DÙNG:
-    python predict_single_image.py --weights runs_signature\\sweep_yolo11s_imgsz1024\\weights\\best.pt --image test/image-copy-2.png --conf 0.15 --imgsz 1024
+    uv run predict_single_image.py --weights runs/detect/runs_signature/yolo26_sig_stamp/weights/best.pt --image test/image-copy-2.png --conf 0.15 --imgsz 1024
 
 Ảnh scan nguyên trang, chữ ký nhỏ:
-    python predict_single_image.py --weights best.pt --image test/page.jpg --conf 0.15 --imgsz 1280 --roi bottom
+    uv run predict_single_image.py --weights runs/detect/runs_signature/yolo26_sig_stamp/weights/best.pt --image test/page.jpg --conf 0.15 --imgsz 1280 --roi bottom
 
 Ảnh rất lớn:
-    python predict_single_image.py --weights best.pt --image test/page.jpg --conf 0.15 --imgsz 1280 --tile_size 1280 --tile_overlap 0.25
+    uv run predict_single_image.py --weights runs/detect/runs_signature/yolo26_sig_stamp/weights/best.pt --image test/page.jpg --conf 0.15 --imgsz 1280 --tile_size 1280 --tile_overlap 0.25
 Ảnh nhỏ 400x600,chữ ký lớn:
-    python predict_single_image.py --weights best.pt --image test/page.jpg --conf 0.15 --imgsz 1024
+    uv run predict_single_image.py --weights runs/detect/runs_signature/yolo26_sig_stamp/weights/best.pt --image test/page.jpg --conf 0.15 --imgsz 1024
 ảnh scan 1 trang A4, 307
 
 Tham số hữu ích:

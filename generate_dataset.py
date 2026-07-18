@@ -11,7 +11,7 @@ Class id: 0 = signature, 1 = stamp
 CÁCH DÙNG NHANH:
     800x1100, 1000x1400, 1200x1600, 1600x1000, 1920x1080
 Nếu muốn sinh đúng một kích thước cũ:
-    python generate_dataset.py --num_samples 2000 --out_dir dataset_documents_multisig --documents_dir documents --signatures_dir signatures_dir --regions_json document_regions.json --signature_scale 1.875 --stamp_scale 2.0 --min_signatures 2 --max_signatures 5 --size_profile fixed --img_w 1000 --img_h 1400
+    python generate_dataset.py --num_samples 2000 --out_dir dataset_documents_multisig --documents_dir documents --signatures_dir signatures_dir --regions_json document_regions.json --signature_scale 2.8125 --stamp_scale 2.0 --min_signatures 2 --max_signatures 5 --size_profile fixed --img_w 1191 --img_h 1684
 
 CHUẨN BỊ DỮ LIỆU ĐẦU VÀO (khuyến nghị để chất lượng thật hơn):
     - Để các ảnh phiếu/đơn mẫu .png/.jpg vào thư mục --documents_dir. Nếu có,
@@ -39,11 +39,11 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
 
 SIGNATURE_INK_COLORS = [
-    (0, 0, 0),         # den dam
-    (10, 20, 95),      # xanh dam
-    (0, 45, 130),      # xanh but bi dam hon
-    (20, 25, 140),     # xanh tim dam
-    (0, 60, 140),      # xanh sang hon mot chut nhung van dam
+    (5, 30, 85),       # xanh navy rat dam
+    (0, 45, 115),      # xanh but bi dam
+    (5, 60, 140),      # xanh dam vua
+    (20, 80, 165),     # xanh vua
+    (45, 110, 190),    # xanh nhat
 ]
 
 DEFAULT_SIGNATURE_ZONES = [
@@ -327,9 +327,9 @@ def _bezier_point(p0, p1, p2, p3, t):
 
 
 def random_signature_ink_color(alpha=255):
-    """Chon mau muc chu ky, uu tien den/xanh vi day la mau hay gap trong thuc te."""
+    """Chon muc xanh lam voi nhieu muc do dam/nhat khac nhau."""
     r, g, b = random.choice(SIGNATURE_INK_COLORS)
-    # Them jitter nhe de model khong bi le thuoc vao vai mau co dinh.
+    # Jitter dong deu giup da dang sac do ma van luon giu mau xanh lam.
     jitter = random.randint(-12, 12)
     r = max(0, min(255, r + jitter))
     g = max(0, min(255, g + jitter))
@@ -492,7 +492,7 @@ def compose_sample(
     bg_size=(1000, 1400),
     signatures_pool=None,
     documents_pool=None,
-    signature_scale=1.875,
+    signature_scale=2.8125,
     stamp_scale=2.0,
     min_signatures=2,
     max_signatures=5,
@@ -824,7 +824,7 @@ def main():
     parser.add_argument("--regions_json", type=str, default=None,
                             help="File JSON khai báo vùng đặt chữ ký/con dấu theo từng document. "
                                 "Tọa độ normalized [x1,y1,x2,y2] theo ảnh document gốc.")
-    parser.add_argument("--signature_scale", type=float, default=1.875,
+    parser.add_argument("--signature_scale", type=float, default=2.8125,
                             help="He so phong to chu ky so voi kich thuoc mac dinh.")
     parser.add_argument("--stamp_scale", type=float, default=2.0,
                             help="He so phong to con dau/moc so voi kich thuoc mac dinh.")
