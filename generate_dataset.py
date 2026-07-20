@@ -1,56 +1,54 @@
 """
-generate_dataset.py
-====================
-Sinh dữ liệu tổng hợp (synthetic) cho bài toán phát hiện CHỮ KÝ (signature) và
-CON DẤU (stamp) trên ảnh chứng từ (phiếu thu/chi, hoá đơn), có chủ động tạo ra
-các trường hợp con dấu đè lên chữ ký (occlusion) để model học tốt case khó này.
+Sinh dataset YOLO phat hien chu ky va con dau tu hai nguon du lieu:
 
-Output: ảnhr .jpg + nhãn YOLO fomat (.txt) trong thư mục dataset/images, dataset/labels
-Class id: 0 = signature, 1 = stamp
+1. ``signatures_dir``: anh chu ky that, co the co nen trang/xam/mau va chu in thua.
+2. ``documents``: anh bieu mau sach; vung ky/dong dau nam trong
+   ``document_regions.json``.
 
-CÁCH DÙNG NHANH:
-    800x1100, 1000x1400, 1200x1600, 1600x1000, 1920x1080
-Nếu muốn sinh đúng một kích thước cũ:
-    python generate_dataset.py --num_samples 2000 --out_dir dataset_documents_multisig --documents_dir documents --signatures_dir signatures_dir --regions_json document_regions.json --signature_scale 2.8125 --stamp_scale 2.0 --min_signatures 2 --max_signatures 5 --size_profile fixed --img_w 1191 --img_h 1684
+Mac dinh script:
 
-CHUẨN BỊ DỮ LIỆU ĐẦU VÀO (khuyến nghị để chất lượng thật hơn):
-    - Để các ảnh phiếu/đơn mẫu .png/.jpg vào thư mục --documents_dir. Nếu có,
-      script sẽ dùng các ảnh này làm nền thật thay vì tự vẽ form giả.
-    - Có thể khai báo vùng đặt chữ ký/con dấu theo từng file document bằng
-      --regions_json. Tọa độ vùng là normalized [x1,y1,x2,y2] trong khoảng 0..1.
-    - Tải chữ ký thật từ CEDAR / GPDS / ICDAR SigComp, để các ảnh .png/.jpg
-      (nền trắng, mực đen/xanh) vào thư mục --signatures_dir
-    - Nếu KHÔNG có, script tự sinh chữ ký giả bằng đường cong Bezier ngẫu nhiên
-      (chất lượng thấp hơn thật nhưng vẫn giúp model học được hình dạng/pattern cơ bản)
-    - Con dấu được sinh HOÀN TOÀN bằng code (không cần dataset), vì con dấu có
-      cấu trúc hình học đều đặn (tròn/vuông + viền + chữ) dễ mô phỏng.
+- nap truc tiep ``signatures_dir``, ``documents`` va ``document_regions.json``;
+- lam sach, tach nen va crop sat net muc cua tung chu ky;
+- dung moi document gan nhu deu nhau thay vi random lech phan bo;
+- giu nguyen chieu va ty le goc cua document (portrait/landscape);
+- xuat anh, nhan YOLO va ``manifest.jsonl`` de truy vet nguon mau.
+
+Vi du:
+
+    python generate_dataset.py --num_samples 2000 --out_dir dataset_generated
+
+Kiem tra dau vao ma khong sinh file:
+
+    python generate_dataset.py --validate_only
+
+Class YOLO: 0 = signature, 1 = stamp.
 """
 
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import math
 import os
 import random
-import math
-import argparse
-import glob
-import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Sequence
 
-import numpy as np
 import cv2
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
+import numpy as np
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 
-SIGNATURE_INK_COLORS = [
-    (5, 30, 85),       # xanh navy rat dam
-    (0, 45, 115),      # xanh but bi dam
-    (5, 60, 140),      # xanh dam vua
-    (20, 80, 165),     # xanh vua
-    (45, 110, 190),    # xanh nhat
-]
+SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+CLASS_SIGNATURE = 0
+CLASS_STAMP = 1
 
 DEFAULT_SIGNATURE_ZONES = [
     [0.08, 0.80, 0.42, 0.96],
     [0.55, 0.80, 0.94, 0.96],
 ]
-
 DEFAULT_REALISTIC_SIZES = [
     (800, 1100),
     (1000, 1400),
@@ -59,889 +57,1178 @@ DEFAULT_REALISTIC_SIZES = [
     (1920, 1080),
 ]
 
-
-# ----------------------------------------------------------------------------
-# 1. SINH NỀN TÀI LIỆU (background giống phiếu thu/chi/hoá đơn)
-# ----------------------------------------------------------------------------
-
-def generate_background(width, height):
-    """Sinh 1 ảnh nền trắng giống chứng từ: có bảng, đường kẻ, vài dòng text giả."""
-    img = Image.new("RGB", (width, height), color=(255, 255, 255))
-    draw = ImageDraw.Draw(img)
-
-    try:
-        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
-        font_text = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
-    except Exception:
-        font_title = ImageFont.load_default()
-        font_text = ImageFont.load_default()
-
-    # Tiêu đề giả
-    titles = ["PHIẾU CHI", "PHIẾU THU", "HOA DON GTGT", "BIEN BAN BAN GIAO", "PHIEU THANH TOAN"]
-    draw.text((width * 0.32, 30), random.choice(titles), fill=(0, 0, 0), font=font_title)
-
-    # Vài dòng thông tin giả phía trên
-    fake_lines = [
-        "So chung tu: {}".format(random.randint(1000, 9999)),
-        "Ngay lap: {:02d}/{:02d}/2026".format(random.randint(1, 28), random.randint(1, 12)),
-        "Don vi: Cong ty TNHH ABC",
-        "Nguoi nop/nhan: Nguyen Van {}".format(random.choice("ABCDEFGH")),
-        "So tien: {:,} VND".format(random.randint(100000, 50000000)),
-    ]
-    y = 80
-    for line in fake_lines:
-        draw.text((60, y), line, fill=(20, 20, 20), font=font_text)
-        y += 26
-
-    # Vẽ bảng kẻ ô giả (mô phỏng bảng chi tiết)
-    table_top = y + 20
-    table_bottom = int(height * 0.65)
-    n_rows = random.randint(3, 6)
-    row_h = (table_bottom - table_top) // n_rows
-    for r in range(n_rows + 1):
-        yy = table_top + r * row_h
-        draw.line([(60, yy), (width - 60, yy)], fill=(0, 0, 0), width=1)
-    for xx in [60, width * 0.6, width - 60]:
-        draw.line([(xx, table_top), (xx, table_bottom)], fill=(0, 0, 0), width=1)
-
-    # Khu vực chữ ký ở cuối trang (label gợi ý, không phải box nhãn)
-    sign_zone_y = int(height * 0.78)
-    draw.text((80, sign_zone_y), "Nguoi lap phieu", fill=(0, 0, 0), font=font_text)
-    draw.text((width - 260, sign_zone_y), "Nguoi ky duyet", fill=(0, 0, 0), font=font_text)
-    draw.text((80, sign_zone_y + 20), "(Ky, ghi ro ho ten)", fill=(90, 90, 90), font=font_text)
-    draw.text((width - 260, sign_zone_y + 20), "(Ky, ghi ro ho ten)", fill=(90, 90, 90), font=font_text)
-
-    return img
+BLUE_INK_COLORS = [
+    (5, 30, 85),
+    (0, 45, 115),
+    (5, 60, 140),
+    (20, 80, 165),
+    (45, 110, 190),
+]
+BLACK_INK_COLORS = [
+    (8, 12, 18),
+    (20, 25, 32),
+    (35, 38, 45),
+]
 
 
-def validate_normalized_zones(zones, source_name, field_name):
-    """Kiem tra va chuan hoa danh sach box normalized [x1,y1,x2,y2]."""
-    valid = []
-    if zones is None:
-        return valid
-    if not isinstance(zones, list):
-        print(f"[warn] {source_name}.{field_name} phai la list -> bo qua")
-        return valid
+@dataclass(frozen=True)
+class SignatureAsset:
+    name: str
+    image: Image.Image
+    source_group: str
 
-    for idx, zone in enumerate(zones):
-        if not isinstance(zone, list) or len(zone) != 4:
-            print(f"[warn] {source_name}.{field_name}[{idx}] khong dung [x1,y1,x2,y2] -> bo qua")
-            continue
+
+@dataclass(frozen=True)
+class DocumentTemplate:
+    name: str
+    path: Path
+    image: Image.Image
+    signature_zones: list[list[float]]
+    stamp_zones: list[list[float]]
+
+
+def iter_image_paths(directory: str | os.PathLike, recursive: bool = True) -> list[Path]:
+    root = Path(directory)
+    iterator: Iterable[Path] = root.rglob("*") if recursive else root.iterdir()
+    return sorted(
+        (path for path in iterator if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS),
+        key=lambda path: str(path).lower(),
+    )
+
+
+def load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+    names = ["arialbd.ttf", "Arial Bold.ttf"] if bold else ["arial.ttf", "Arial.ttf"]
+    candidates = [Path("C:/Windows/Fonts") / name for name in names]
+    candidates.extend([
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else
+             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    ])
+    for path in candidates:
         try:
-            x1, y1, x2, y2 = [float(v) for v in zone]
-        except (TypeError, ValueError):
-            print(f"[warn] {source_name}.{field_name}[{idx}] co gia tri khong phai so -> bo qua")
+            return ImageFont.truetype(str(path), size)
+        except (OSError, ValueError):
             continue
+    return ImageFont.load_default()
+
+
+# -----------------------------------------------------------------------------
+# Cau hinh document va vung dat object
+# -----------------------------------------------------------------------------
+
+def validate_normalized_zones(zones, source_name: str, field_name: str) -> list[list[float]]:
+    if zones is None:
+        return []
+    if not isinstance(zones, list):
+        raise ValueError(f"{source_name}.{field_name} phai la list")
+
+    normalized = []
+    for index, zone in enumerate(zones):
+        if not isinstance(zone, list) or len(zone) != 4:
+            raise ValueError(f"{source_name}.{field_name}[{index}] phai co dang [x1,y1,x2,y2]")
+        try:
+            x1, y1, x2, y2 = [float(value) for value in zone]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{source_name}.{field_name}[{index}] chua gia tri khong phai so") from exc
         if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
-            print(f"[warn] {source_name}.{field_name}[{idx}] phai nam trong khoang 0..1 va x1<x2,y1<y2 -> bo qua")
-            continue
-        valid.append([x1, y1, x2, y2])
-    return valid
-
-
-def normalize_region_block(block, source_name):
-    """Lay signature_zones/stamp_zones hop le tu 1 block cau hinh."""
-    if not isinstance(block, dict):
-        print(f"[warn] {source_name} phai la object JSON -> bo qua")
-        return {}
-
-    normalized = {}
-    for field_name in ("signature_zones", "stamp_zones"):
-        if field_name not in block:
-            continue
-        zones = validate_normalized_zones(block.get(field_name), source_name, field_name)
-        if zones or block.get(field_name) == []:
-            normalized[field_name] = zones
+            raise ValueError(
+                f"{source_name}.{field_name}[{index}] phai nam trong 0..1 va co x1<x2, y1<y2"
+            )
+        normalized.append([x1, y1, x2, y2])
     return normalized
 
 
-def load_document_region_config(regions_json):
-    """
-    Doc cau hinh gioi han vung dat chu ky/moc theo tung document.
-    Toa do la normalized theo document goc: [x1, y1, x2, y2] trong khoang 0..1.
-    """
-    with open(regions_json, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+def normalize_region_block(block, source_name: str) -> dict[str, list[list[float]]]:
+    if not isinstance(block, dict):
+        raise ValueError(f"{source_name} phai la object JSON")
+    result = {}
+    for field_name in ("signature_zones", "stamp_zones"):
+        if field_name in block:
+            result[field_name] = validate_normalized_zones(block[field_name], source_name, field_name)
+    return result
 
+
+def load_document_region_config(regions_json: str | os.PathLike) -> dict:
+    path = Path(regions_json)
+    with path.open("r", encoding="utf-8") as handle:
+        raw = json.load(handle)
     if not isinstance(raw, dict):
-        raise ValueError("--regions_json phai la object JSON")
-
-    config = {
-        "default": normalize_region_block(raw.get("default", {}), "default"),
-        "documents": {},
-    }
+        raise ValueError(f"{path} phai chua mot JSON object")
 
     documents_raw = raw.get("documents", {})
     if not isinstance(documents_raw, dict):
-        print("[warn] documents trong regions_json phai la object -> bo qua")
-        documents_raw = {}
+        raise ValueError("documents trong regions_json phai la object")
 
-    for doc_name, block in documents_raw.items():
-        normalized = normalize_region_block(block, f"documents.{doc_name}")
-        if normalized:
-            config["documents"][os.path.basename(doc_name)] = normalized
+    documents = {}
+    for document_name, block in documents_raw.items():
+        basename = Path(document_name).name
+        if basename in documents:
+            raise ValueError(f"Trung ten document trong regions_json: {basename}")
+        documents[basename] = normalize_region_block(block, f"documents.{basename}")
 
-    return config
+    return {
+        "default": normalize_region_block(raw.get("default", {}), "default"),
+        "documents": documents,
+    }
 
 
-def get_regions_for_document(path, region_config):
-    """Ghep default + cau hinh rieng theo basename document."""
+def get_regions_for_document(path: str | os.PathLike, region_config: dict | None) -> dict:
     regions = {
-        "signature_zones": DEFAULT_SIGNATURE_ZONES,
+        "signature_zones": [zone[:] for zone in DEFAULT_SIGNATURE_ZONES],
+        "stamp_zones": [],
     }
     if region_config:
         regions.update(region_config.get("default", {}))
-        regions.update(region_config.get("documents", {}).get(os.path.basename(path), {}))
-    if not regions.get("signature_zones"):
-        regions["signature_zones"] = DEFAULT_SIGNATURE_ZONES
+        regions.update(region_config.get("documents", {}).get(Path(path).name, {}))
     return regions
 
 
-def normalized_zones_to_pixel_zones(zones, content_box):
-    """Doi cac box normalized theo document content thanh box pixel tren canvas output."""
+def load_document_backgrounds(
+    documents_dir: str | os.PathLike,
+    region_config: dict | None = None,
+    strict_regions: bool = True,
+) -> list[DocumentTemplate]:
+    paths = iter_image_paths(documents_dir, recursive=False)
+    if not paths:
+        return []
+
+    basenames = [path.name for path in paths]
+    duplicate_names = sorted({name for name in basenames if basenames.count(name) > 1})
+    if duplicate_names:
+        raise ValueError(f"Trung basename trong documents_dir: {duplicate_names}")
+
+    if region_config:
+        configured = set(region_config.get("documents", {}))
+        actual = set(basenames)
+        missing = sorted(actual - configured)
+        extra = sorted(configured - actual)
+        if strict_regions and (missing or extra):
+            details = []
+            if missing:
+                details.append(f"thieu cau hinh: {missing}")
+            if extra:
+                details.append(f"cau hinh khong co anh: {extra}")
+            raise ValueError("regions_json khong khop documents_dir (" + "; ".join(details) + ")")
+        if missing:
+            print(f"[warn] {len(missing)} document se dung vung mac dinh: {', '.join(missing)}")
+        if extra:
+            print(f"[warn] {len(extra)} cau hinh khong co document tuong ung: {', '.join(extra)}")
+
+    documents = []
+    for path in paths:
+        try:
+            with Image.open(path) as opened:
+                image = ImageOps.exif_transpose(opened).convert("RGB").copy()
+            regions = get_regions_for_document(path, region_config)
+            documents.append(DocumentTemplate(
+                name=path.name,
+                path=path,
+                image=image,
+                signature_zones=regions.get("signature_zones", []),
+                stamp_zones=regions.get("stamp_zones", []),
+            ))
+        except Exception as exc:
+            raise ValueError(f"Khong doc duoc document {path}: {exc}") from exc
+    return documents
+
+
+def normalized_zones_to_pixel_zones(
+    zones: Sequence[Sequence[float]],
+    content_box: tuple[int, int, int, int],
+) -> list[tuple[int, int, int, int]]:
     cx1, cy1, cx2, cy2 = content_box
-    content_w = cx2 - cx1
-    content_h = cy2 - cy1
-    pixel_zones = []
-    for x1, y1, x2, y2 in zones:
-        pixel_zones.append((
-            int(cx1 + content_w * x1),
-            int(cy1 + content_h * y1),
-            int(cx1 + content_w * x2),
-            int(cy1 + content_h * y2),
-        ))
-    return pixel_zones
+    width = cx2 - cx1
+    height = cy2 - cy1
+    return [
+        (
+            round(cx1 + width * x1),
+            round(cy1 + height * y1),
+            round(cx1 + width * x2),
+            round(cy1 + height * y2),
+        )
+        for x1, y1, x2, y2 in zones
+    ]
 
 
-def parse_image_sizes(raw):
-    """Parse chuoi kich thuoc dang '800x1100,1600x1000'."""
+def prepare_document_background(
+    document_image: Image.Image,
+    width: int,
+    height: int,
+) -> tuple[Image.Image, tuple[int, int, int, int]]:
+    source_width, source_height = document_image.size
+    if (source_width, source_height) == (width, height):
+        return document_image.copy(), (0, 0, width, height)
+
+    canvas = Image.new("RGB", (width, height), (255, 255, 255))
+    scale = min(width / source_width, height / source_height)
+    resized_width = max(1, round(source_width * scale))
+    resized_height = max(1, round(source_height * scale))
+    resized = document_image.resize((resized_width, resized_height), Image.Resampling.LANCZOS)
+    x = (width - resized_width) // 2
+    y = (height - resized_height) // 2
+    canvas.paste(resized, (x, y))
+    return canvas, (x, y, x + resized_width, y + resized_height)
+
+
+# -----------------------------------------------------------------------------
+# Tien xu ly bo signatures_dir moi
+# -----------------------------------------------------------------------------
+
+def _trim_rgba(image: Image.Image, alpha_threshold: int = 8, padding: int = 2) -> Image.Image | None:
+    rgba = image.convert("RGBA")
+    alpha = np.asarray(rgba)[..., 3]
+    ys, xs = np.where(alpha >= alpha_threshold)
+    if len(xs) == 0:
+        return None
+    x1 = max(0, int(xs.min()) - padding)
+    y1 = max(0, int(ys.min()) - padding)
+    x2 = min(rgba.width, int(xs.max()) + padding + 1)
+    y2 = min(rgba.height, int(ys.max()) + padding + 1)
+    return rgba.crop((x1, y1, x2, y2))
+
+
+def _estimate_signature_alpha(image: Image.Image) -> np.ndarray:
+    rgba = np.asarray(image.convert("RGBA"))
+    source_alpha = rgba[..., 3]
+    if np.any(source_alpha < 250):
+        return source_alpha.copy()
+
+    rgb = rgba[..., :3].astype(np.float32)
+    height, width = rgb.shape[:2]
+    border_size = max(1, min(height, width) // 20)
+    border_pixels = np.concatenate([
+        rgb[:border_size].reshape(-1, 3),
+        rgb[-border_size:].reshape(-1, 3),
+        rgb[:, :border_size].reshape(-1, 3),
+        rgb[:, -border_size:].reshape(-1, 3),
+    ])
+    background = np.median(border_pixels, axis=0)
+    weights = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    background_luma = float(background @ weights)
+    luma = rgb @ weights
+    color_distance = np.linalg.norm(rgb - background, axis=2)
+
+    # Ket hop do toi va khoang cach mau de tach duoc ca muc den lan muc xanh
+    # tren nen trang, xam hoac xanh nhat.
+    ink_strength = np.maximum(0.0, background_luma - luma) * 0.75 + color_distance * 0.45
+    if float(ink_strength.max()) < 4:
+        return np.zeros((height, width), dtype=np.uint8)
+
+    score = np.clip(ink_strength, 0, 255).astype(np.uint8)
+    otsu_threshold, _ = cv2.threshold(score, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    low = max(6.0, float(otsu_threshold) * 0.55)
+    strong_values = ink_strength[ink_strength > low]
+    if strong_values.size == 0:
+        return np.zeros((height, width), dtype=np.uint8)
+    high = max(low + 12.0, float(np.percentile(strong_values, 92)))
+    return np.clip((ink_strength - low) * 255.0 / (high - low), 0, 255).astype(np.uint8)
+
+
+def _retain_primary_ink_cluster(alpha: np.ndarray) -> np.ndarray:
+    """Loai bot chu in roi quanh cac crop ``*_sig_*`` ma van giu cum net ky chinh."""
+    height, width = alpha.shape
+    binary = (alpha >= 28).astype(np.uint8)
+    if int(binary.sum()) < 8:
+        return np.zeros_like(alpha)
+
+    kernel_width = max(3, round(width * 0.018))
+    kernel_height = max(1, round(height * 0.006))
+    joined = cv2.dilate(
+        binary,
+        np.ones((kernel_height, kernel_width), dtype=np.uint8),
+        iterations=1,
+    )
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(joined, 8)
+
+    candidates = []
+    for component_id in range(1, component_count):
+        x, y, box_width, box_height, _ = stats[component_id]
+        raw_pixel_count = int(binary[labels == component_id].sum())
+        if raw_pixel_count < 4:
+            continue
+        relative_center_y = (y + box_height / 2) / max(1, height)
+        center_weight = 0.75 + 0.25 * (1.0 - abs(relative_center_y - 0.5))
+        # Chu ky thuong rong va cao hon dong chu in nho; luy thua chieu cao
+        # giup uu tien net viet tay thay vi dong chuc danh ben duoi.
+        score = box_width * max(3, box_height) ** 1.55 * center_weight
+        candidates.append((score, component_id))
+
+    if not candidates:
+        return np.zeros_like(alpha)
+    _, primary_id = max(candidates)
+    return np.where(labels == primary_id, alpha, 0).astype(np.uint8)
+
+
+def preprocess_signature(path: Path) -> Image.Image | None:
+    with Image.open(path) as opened:
+        source = ImageOps.exif_transpose(opened).convert("RGBA")
+
+    alpha = _estimate_signature_alpha(source)
+    if "_sig_" in path.name.lower():
+        alpha = _retain_primary_ink_cluster(alpha)
+
+    ys, xs = np.where(alpha >= 16)
+    if len(xs) < 12:
+        return None
+    x1, x2 = int(xs.min()), int(xs.max()) + 1
+    y1, y2 = int(ys.min()), int(ys.max()) + 1
+    content_width = x2 - x1
+    content_height = y2 - y1
+    if content_width < 8 or content_height < 3:
+        return None
+    aspect_ratio = content_width / max(1, content_height)
+    if not (0.35 <= aspect_ratio <= 22.0):
+        return None
+
+    rgba = np.zeros((source.height, source.width, 4), dtype=np.uint8)
+    rgba[..., :3] = (8, 45, 125)
+    rgba[..., 3] = alpha
+    padding = max(1, round(max(source.size) * 0.008))
+    return _trim_rgba(Image.fromarray(rgba, mode="RGBA"), alpha_threshold=12, padding=padding)
+
+
+def load_real_signatures(signatures_dir: str | os.PathLike) -> list[SignatureAsset]:
+    paths = iter_image_paths(signatures_dir, recursive=True)
+    signatures = []
+    rejected = []
+    for path in paths:
+        try:
+            image = preprocess_signature(path)
+            if image is None:
+                rejected.append(path.name)
+                continue
+            group = "auto_crop" if "_sig_" in path.name.lower() else "clean_image"
+            signatures.append(SignatureAsset(path.name, image, group))
+        except Exception as exc:
+            rejected.append(path.name)
+            print(f"[warn] Bo qua chu ky {path.name}: {exc}")
+
+    if rejected:
+        preview = ", ".join(rejected[:5])
+        suffix = "..." if len(rejected) > 5 else ""
+        print(f"[warn] Loai {len(rejected)} anh chu ky rong/khong hop le: {preview}{suffix}")
+    return signatures
+
+
+def choose_signature_color(blue_probability: float) -> tuple[int, int, int]:
+    palette = BLUE_INK_COLORS if random.random() < blue_probability else BLACK_INK_COLORS
+    red, green, blue = random.choice(palette)
+    jitter = random.randint(-10, 10)
+    return tuple(max(0, min(255, channel + jitter)) for channel in (red, green, blue))
+
+
+def style_signature(asset: SignatureAsset, blue_probability: float) -> Image.Image:
+    alpha = np.asarray(asset.image.convert("RGBA"))[..., 3].copy()
+    if random.random() < 0.12:
+        kernel = np.ones((2, 2), dtype=np.uint8)
+        alpha = cv2.dilate(alpha, kernel, iterations=1)
+    elif random.random() < 0.10:
+        kernel = np.ones((2, 2), dtype=np.uint8)
+        alpha = cv2.erode(alpha, kernel, iterations=1)
+
+    gain = random.uniform(0.78, 1.12)
+    gamma = random.uniform(0.85, 1.15)
+    normalized = np.clip(alpha.astype(np.float32) / 255.0, 0, 1) ** gamma
+    alpha = np.clip(normalized * 255.0 * gain, 0, 255).astype(np.uint8)
+
+    color = choose_signature_color(blue_probability)
+    rgba = np.zeros((*alpha.shape, 4), dtype=np.uint8)
+    rgba[..., :3] = color
+    rgba[..., 3] = alpha
+    image = Image.fromarray(rgba, mode="RGBA")
+    if random.random() < 0.12:
+        image = image.filter(ImageFilter.GaussianBlur(random.uniform(0.2, 0.55)))
+    return image
+
+
+def _bezier_point(p0, p1, p2, p3, t):
+    x = (1 - t) ** 3 * p0[0] + 3 * (1 - t) ** 2 * t * p1[0] + 3 * (1 - t) * t ** 2 * p2[0] + t ** 3 * p3[0]
+    y = (1 - t) ** 3 * p0[1] + 3 * (1 - t) ** 2 * t * p1[1] + 3 * (1 - t) * t ** 2 * p2[1] + t ** 3 * p3[1]
+    return x, y
+
+
+def generate_fake_signature(width: int = 300, height: int = 120) -> Image.Image:
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    color = (*random.choice(BLUE_INK_COLORS), 255)
+    cursor_x = width * 0.05
+    for _ in range(random.randint(2, 4)):
+        stroke_length = random.uniform(width * 0.25, width * 0.5)
+        p0 = (cursor_x, random.uniform(height * 0.3, height * 0.7))
+        p1 = (cursor_x + stroke_length * 0.3, random.uniform(0, height))
+        p2 = (cursor_x + stroke_length * 0.6, random.uniform(0, height))
+        p3 = (cursor_x + stroke_length, random.uniform(height * 0.3, height * 0.7))
+        points = [_bezier_point(p0, p1, p2, p3, t) for t in np.linspace(0, 1, 60)]
+        draw.line(points, fill=color, width=random.randint(2, 4), joint="curve")
+        cursor_x += stroke_length * random.uniform(0.7, 0.95)
+    if random.random() < 0.5:
+        y = height * random.uniform(0.75, 0.9)
+        draw.line([(width * 0.05, y), (width * 0.75, y)], fill=color, width=2)
+    return _trim_rgba(image.filter(ImageFilter.GaussianBlur(0.35))) or image
+
+
+# -----------------------------------------------------------------------------
+# Con dau procedural
+# -----------------------------------------------------------------------------
+
+def generate_stamp(size: int = 180) -> Image.Image:
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    red = random.choice([(160, 0, 0, 225), (180, 8, 8, 215), (145, 0, 15, 220)])
+    margin = max(4, round(size * 0.045))
+    outer_width = max(2, round(size * 0.022))
+    inner_width = max(1, round(size * 0.012))
+    draw.ellipse([margin, margin, size - margin, size - margin], outline=red, width=outer_width)
+    inset = max(8, round(size * 0.12))
+    draw.ellipse([margin + inset, margin + inset, size - margin - inset, size - margin - inset],
+                 outline=red, width=inner_width)
+
+    font = load_font(max(8, round(size * 0.075)), bold=True)
+    center_text = random.choice(["CTY ABC", "KE TOAN", "DA THU", "PHONG TC-KT"])
+    text_box = draw.textbbox((0, 0), center_text, font=font)
+    text_width = text_box[2] - text_box[0]
+    text_height = text_box[3] - text_box[1]
+    draw.text(((size - text_width) / 2, (size - text_height) / 2), center_text, fill=red, font=font)
+
+    center = size / 2
+    radius = size / 2 - max(12, round(size * 0.14))
+    arc_text = "CONG TY TNHH VIET NAM"
+    angle_start = 205
+    angle_step = 10
+    character_size = max(12, round(size * 0.11))
+    for index, character in enumerate(arc_text[:16]):
+        angle_degrees = angle_start - index * angle_step
+        angle = math.radians(angle_degrees)
+        x = center + radius * math.cos(angle)
+        y = center + radius * math.sin(angle)
+        character_image = Image.new("RGBA", (character_size * 2, character_size * 2), (0, 0, 0, 0))
+        ImageDraw.Draw(character_image).text((2, 2), character, fill=red, font=font)
+        character_image = character_image.rotate(-angle_degrees - 90, expand=True, resample=Image.Resampling.BICUBIC)
+        image.paste(character_image, (round(x - character_image.width / 2), round(y - character_image.height / 2)), character_image)
+
+    rgba = np.asarray(image).copy()
+    original_alpha = rgba[..., 3]
+    noise = np.random.normal(0, 13, original_alpha.shape)
+    noisy_alpha = np.clip(original_alpha.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+    # Khong them noise vao nen trong suot, tranh tao hinh vuong mo quanh con dau.
+    rgba[..., 3] = np.where(original_alpha > 0, noisy_alpha, 0)
+    result = Image.fromarray(rgba, mode="RGBA")
+    result = result.rotate(random.uniform(-10, 10), expand=True, resample=Image.Resampling.BICUBIC)
+    return _trim_rgba(result, alpha_threshold=5, padding=2) or result
+
+
+# -----------------------------------------------------------------------------
+# Ghep object vao document
+# -----------------------------------------------------------------------------
+
+def fit_asset_to_zone(asset: Image.Image, zone: tuple[int, int, int, int], max_fill: float = 0.96) -> Image.Image:
+    x1, y1, x2, y2 = zone
+    max_width = max(1, round((x2 - x1) * max_fill))
+    max_height = max(1, round((y2 - y1) * max_fill))
+    scale = min(1.0, max_width / max(1, asset.width), max_height / max(1, asset.height))
+    if scale >= 1:
+        return asset
+    return asset.resize(
+        (max(1, round(asset.width * scale)), max(1, round(asset.height * scale))),
+        Image.Resampling.LANCZOS,
+    )
+
+
+def resize_signature_for_zone(
+    signature: Image.Image,
+    zone: tuple[int, int, int, int],
+    signature_scale: float,
+) -> Image.Image:
+    zone_width = max(1, zone[2] - zone[0])
+    width_fill = random.triangular(0.45, 0.96, 0.74) * signature_scale
+    target_width = max(8, round(zone_width * width_fill))
+    scale = target_width / max(1, signature.width)
+    resized = signature.resize(
+        (target_width, max(3, round(signature.height * scale))),
+        Image.Resampling.LANCZOS,
+    )
+    resized = resized.rotate(random.uniform(-6, 6), expand=True, resample=Image.Resampling.BICUBIC)
+    resized = _trim_rgba(resized, alpha_threshold=5, padding=1) or resized
+    return fit_asset_to_zone(resized, zone)
+
+
+def choose_position_in_zone(
+    asset: Image.Image,
+    zone: tuple[int, int, int, int],
+    image_width: int,
+    image_height: int,
+    center_hint: tuple[float, float] | None = None,
+) -> tuple[int, int]:
+    x1, y1, x2, y2 = zone
+    min_x = max(0, x1)
+    min_y = max(0, y1)
+    max_x = min(image_width, x2) - asset.width
+    max_y = min(image_height, y2) - asset.height
+    if center_hint:
+        x = round(center_hint[0] - asset.width / 2)
+        y = round(center_hint[1] - asset.height / 2)
+    else:
+        x = random.randint(min_x, max_x) if max_x >= min_x else min_x
+        y = random.randint(min_y, max_y) if max_y >= min_y else min_y
+    x = max(0, min(x, image_width - asset.width))
+    y = max(0, min(y, image_height - asset.height))
+    if max_x >= min_x:
+        x = max(min_x, min(x, max_x))
+    if max_y >= min_y:
+        y = max(min_y, min(y, max_y))
+    return x, y
+
+
+def paste_with_alpha(
+    background: Image.Image,
+    foreground: Image.Image,
+    x: int,
+    y: int,
+    opacity: float = 1.0,
+) -> tuple[int, int, int, int]:
+    foreground = _trim_rgba(foreground, alpha_threshold=3, padding=0) or foreground.convert("RGBA")
+    if opacity < 1:
+        alpha = np.asarray(foreground)[..., 3].astype(np.float32)
+        alpha = np.clip(alpha * opacity, 0, 255).astype(np.uint8)
+        foreground = foreground.copy()
+        foreground.putalpha(Image.fromarray(alpha, mode="L"))
+    background.paste(foreground, (x, y), foreground)
+    return x, y, x + foreground.width, y + foreground.height
+
+
+def box_iou(first: Sequence[float], second: Sequence[float]) -> float:
+    ix1 = max(first[0], second[0])
+    iy1 = max(first[1], second[1])
+    ix2 = min(first[2], second[2])
+    iy2 = min(first[3], second[3])
+    intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if intersection <= 0:
+        return 0.0
+    first_area = max(0, first[2] - first[0]) * max(0, first[3] - first[1])
+    second_area = max(0, second[2] - second[0]) * max(0, second[3] - second[1])
+    return intersection / max(1.0, first_area + second_area - intersection)
+
+
+def choose_separate_stamp_position(
+    stamp: Image.Image,
+    stamp_zone: tuple[int, int, int, int],
+    signature_boxes: Sequence[Sequence[float]],
+    image_width: int,
+    image_height: int,
+) -> tuple[int, int]:
+    best_position = choose_position_in_zone(stamp, stamp_zone, image_width, image_height)
+    best_score = float("inf")
+    zone_diagonal = max(1.0, math.hypot(stamp_zone[2] - stamp_zone[0], stamp_zone[3] - stamp_zone[1]))
+    for _ in range(24):
+        x, y = choose_position_in_zone(stamp, stamp_zone, image_width, image_height)
+        candidate = (x, y, x + stamp.width, y + stamp.height)
+        overlap = sum(box_iou(candidate, box) for box in signature_boxes)
+        candidate_center = ((candidate[0] + candidate[2]) / 2, (candidate[1] + candidate[3]) / 2)
+        nearest_distance = min(
+            math.hypot(
+                candidate_center[0] - (box[0] + box[2]) / 2,
+                candidate_center[1] - (box[1] + box[3]) / 2,
+            )
+            for box in signature_boxes
+        )
+        # Uu tien khong de len chu ky, nhung van o gan chu ky co tham quyen.
+        score = overlap * 10.0 + nearest_distance / zone_diagonal
+        if score < best_score:
+            best_score = score
+            best_position = (x, y)
+    return best_position
+
+
+def choose_signature_assets(
+    signatures_pool: Sequence[SignatureAsset],
+    count: int,
+    clean_signature_probability: float,
+) -> list[SignatureAsset]:
+    clean_assets = [asset for asset in signatures_pool if asset.source_group == "clean_image"]
+    auto_assets = [asset for asset in signatures_pool if asset.source_group == "auto_crop"]
+    random.shuffle(clean_assets)
+    random.shuffle(auto_assets)
+    selected = []
+    used_names = set()
+
+    for _ in range(count):
+        prefer_clean = random.random() < clean_signature_probability
+        preferred = clean_assets if prefer_clean else auto_assets
+        fallback = auto_assets if prefer_clean else clean_assets
+        candidate = None
+        while preferred and candidate is None:
+            option = preferred.pop()
+            if option.name not in used_names:
+                candidate = option
+        while fallback and candidate is None:
+            option = fallback.pop()
+            if option.name not in used_names:
+                candidate = option
+        if candidate is None:
+            remaining = [asset for asset in signatures_pool if asset.name not in used_names]
+            candidate = random.choice(remaining or list(signatures_pool))
+        selected.append(candidate)
+        used_names.add(candidate.name)
+    return selected
+
+
+def choose_scenario(
+    has_signature_zones: bool,
+    has_stamp_zones: bool,
+    negative_probability: float,
+    stamp_probability: float,
+    stamp_overlap_probability: float,
+) -> str:
+    if not has_signature_zones or random.random() < negative_probability:
+        return "empty"
+    if has_stamp_zones and random.random() < stamp_probability:
+        return "sig_and_stamp_overlap" if random.random() < stamp_overlap_probability else "sig_and_stamp_separate"
+    return "sig_only"
+
+
+def compose_sample(
+    bg_size: tuple[int, int] = (1000, 1400),
+    signatures_pool: Sequence[SignatureAsset] | None = None,
+    document: DocumentTemplate | None = None,
+    documents_pool: Sequence[DocumentTemplate] | None = None,
+    signature_scale: float = 1.0,
+    stamp_scale: float = 1.0,
+    min_signatures: int = 1,
+    max_signatures: int = 5,
+    blue_ink_probability: float = 0.78,
+    clean_signature_probability: float = 0.70,
+    negative_probability: float = 0.08,
+    stamp_probability: float = 0.50,
+    stamp_overlap_probability: float = 0.55,
+) -> tuple[Image.Image, list[tuple[int, int, int, int, int]], dict]:
+    width, height = bg_size
+    if document is None and documents_pool:
+        document = random.choice(list(documents_pool))
+
+    if document:
+        image, content_box = prepare_document_background(document.image, width, height)
+        signature_zone_defs = document.signature_zones
+        stamp_zone_defs = document.stamp_zones
+        document_name = document.name
+    else:
+        image = generate_background(width, height)
+        content_box = (0, 0, width, height)
+        signature_zone_defs = DEFAULT_SIGNATURE_ZONES
+        stamp_zone_defs = []
+        document_name = "synthetic"
+
+    signature_zones = normalized_zones_to_pixel_zones(signature_zone_defs, content_box)
+    stamp_zones = normalized_zones_to_pixel_zones(stamp_zone_defs, content_box)
+    scenario = choose_scenario(
+        bool(signature_zones),
+        bool(stamp_zones),
+        negative_probability,
+        stamp_probability,
+        stamp_overlap_probability,
+    )
+    labels: list[tuple[int, int, int, int, int]] = []
+    used_signature_names = []
+    used_signature_groups = []
+
+    if scenario == "empty":
+        return image, labels, {
+            "document": document_name,
+            "scenario": scenario,
+            "signatures": used_signature_names,
+            "signature_groups": used_signature_groups,
+        }
+
+    minimum = min(max(1, min_signatures), len(signature_zones))
+    maximum = min(max(minimum, max_signatures), len(signature_zones))
+    signature_count = random.randint(minimum, maximum)
+    selected_zones = random.sample(signature_zones, signature_count)
+
+    selected_stamp_zone = random.choice(stamp_zones) if "stamp" in scenario else None
+    if selected_stamp_zone:
+        stamp_center = (
+            (selected_stamp_zone[0] + selected_stamp_zone[2]) / 2,
+            (selected_stamp_zone[1] + selected_stamp_zone[3]) / 2,
+        )
+        authority_zone = min(
+            signature_zones,
+            key=lambda zone: (
+                (zone[0] + zone[2]) / 2 - stamp_center[0]
+            ) ** 2 + (
+                (zone[1] + zone[3]) / 2 - stamp_center[1]
+            ) ** 2,
+        )
+        if authority_zone not in selected_zones:
+            selected_zones[0] = authority_zone
+
+    if signatures_pool:
+        selected_assets = choose_signature_assets(
+            signatures_pool,
+            signature_count,
+            clean_signature_probability,
+        )
+    else:
+        selected_assets = [None] * signature_count
+
+    signature_boxes = []
+    for zone, asset in zip(selected_zones, selected_assets):
+        if asset is None:
+            signature = generate_fake_signature(random.randint(220, 340), random.randint(80, 140))
+            signature_name = "generated_bezier"
+            signature_group = "generated"
+        else:
+            signature = style_signature(asset, blue_ink_probability)
+            signature_name = asset.name
+            signature_group = asset.source_group
+        signature = resize_signature_for_zone(signature, zone, signature_scale)
+        x, y = choose_position_in_zone(signature, zone, width, height)
+        box = paste_with_alpha(image, signature, x, y, opacity=random.uniform(0.84, 1.0))
+        signature_boxes.append(box)
+        labels.append((CLASS_SIGNATURE, *box))
+        used_signature_names.append(signature_name)
+        used_signature_groups.append(signature_group)
+
+    if selected_stamp_zone:
+        zone_width = selected_stamp_zone[2] - selected_stamp_zone[0]
+        zone_height = selected_stamp_zone[3] - selected_stamp_zone[1]
+        diameter = max(16, round(min(zone_width, zone_height) * random.uniform(0.52, 0.90) * stamp_scale))
+        stamp = fit_asset_to_zone(generate_stamp(diameter), selected_stamp_zone, max_fill=0.96)
+
+        if scenario == "sig_and_stamp_overlap":
+            stamp_center = (
+                (selected_stamp_zone[0] + selected_stamp_zone[2]) / 2,
+                (selected_stamp_zone[1] + selected_stamp_zone[3]) / 2,
+            )
+            target_signature = min(
+                signature_boxes,
+                key=lambda box: (
+                    (box[0] + box[2]) / 2 - stamp_center[0]
+                ) ** 2 + (
+                    (box[1] + box[3]) / 2 - stamp_center[1]
+                ) ** 2,
+            )
+            center_hint = (
+                random.uniform(target_signature[0], target_signature[2]),
+                random.uniform(target_signature[1], target_signature[3]),
+            )
+            stamp_x, stamp_y = choose_position_in_zone(
+                stamp, selected_stamp_zone, width, height, center_hint=center_hint
+            )
+        else:
+            stamp_x, stamp_y = choose_separate_stamp_position(
+                stamp, selected_stamp_zone, signature_boxes, width, height
+            )
+
+        stamp_box = paste_with_alpha(image, stamp, stamp_x, stamp_y, opacity=random.uniform(0.68, 0.92))
+        labels.append((CLASS_STAMP, *stamp_box))
+
+    return image, labels, {
+        "document": document_name,
+        "scenario": scenario,
+        "signatures": used_signature_names,
+        "signature_groups": used_signature_groups,
+    }
+
+
+# -----------------------------------------------------------------------------
+# Nen synthetic fallback
+# -----------------------------------------------------------------------------
+
+def generate_background(width: int, height: int) -> Image.Image:
+    image = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    title_font = load_font(max(16, round(width * 0.024)), bold=True)
+    text_font = load_font(max(11, round(width * 0.014)))
+    title = random.choice(["PHIEU CHI", "PHIEU THU", "HOA DON GTGT", "BIEN BAN BAN GIAO"])
+    draw.text((round(width * 0.34), round(height * 0.03)), title, fill=(0, 0, 0), font=title_font)
+    lines = [
+        f"So chung tu: {random.randint(1000, 9999)}",
+        f"Ngay lap: {random.randint(1, 28):02d}/{random.randint(1, 12):02d}/2026",
+        "Don vi: Cong ty TNHH ABC",
+        f"So tien: {random.randint(100_000, 50_000_000):,} VND",
+    ]
+    y = round(height * 0.08)
+    for line in lines:
+        draw.text((round(width * 0.06), y), line, fill=(20, 20, 20), font=text_font)
+        y += round(height * 0.025)
+    table_top = y + round(height * 0.02)
+    table_bottom = round(height * 0.65)
+    for row in range(7):
+        row_y = table_top + round((table_bottom - table_top) * row / 6)
+        draw.line([(round(width * 0.06), row_y), (round(width * 0.94), row_y)], fill=(0, 0, 0), width=1)
+    for x in (0.06, 0.60, 0.94):
+        draw.line([(round(width * x), table_top), (round(width * x), table_bottom)], fill=(0, 0, 0), width=1)
+    return image
+
+
+# -----------------------------------------------------------------------------
+# Augmentation va nhan YOLO
+# -----------------------------------------------------------------------------
+
+def transform_labels_affine(
+    labels: Sequence[Sequence[float]],
+    matrix: np.ndarray,
+    image_width: int,
+    image_height: int,
+    min_box_size: int = 4,
+) -> list[tuple[int, float, float, float, float]]:
+    transformed = []
+    matrix = np.asarray(matrix, dtype=np.float32)
+    for class_id, x1, y1, x2, y2 in labels:
+        corners = np.array([
+            [x1, y1, 1], [x2, y1, 1], [x2, y2, 1], [x1, y2, 1],
+        ], dtype=np.float32)
+        warped = corners @ matrix.T
+        new_x1 = float(np.clip(warped[:, 0].min(), 0, image_width))
+        new_y1 = float(np.clip(warped[:, 1].min(), 0, image_height))
+        new_x2 = float(np.clip(warped[:, 0].max(), 0, image_width))
+        new_y2 = float(np.clip(warped[:, 1].max(), 0, image_height))
+        if new_x2 - new_x1 >= min_box_size and new_y2 - new_y1 >= min_box_size:
+            transformed.append((class_id, new_x1, new_y1, new_x2, new_y2))
+    return transformed
+
+
+def apply_capture_geometry_augmentation(
+    image: Image.Image,
+    labels: Sequence[Sequence[float]],
+) -> tuple[Image.Image, list[tuple[int, float, float, float, float]]]:
+    if random.random() > 0.72:
+        return image, list(labels)
+    array = np.asarray(image.convert("RGB"))
+    height, width = array.shape[:2]
+    matrix = cv2.getRotationMatrix2D(
+        (width / 2, height / 2),
+        random.uniform(-2.2, 2.2),
+        random.uniform(0.97, 1.025),
+    )
+    matrix[0, 2] += random.uniform(-0.018, 0.018) * width
+    matrix[1, 2] += random.uniform(-0.018, 0.018) * height
+    warped = cv2.warpAffine(
+        array,
+        matrix,
+        (width, height),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+    return Image.fromarray(warped), transform_labels_affine(labels, matrix, width, height)
+
+
+def add_uneven_lighting(array: np.ndarray) -> np.ndarray:
+    height, width = array.shape[:2]
+    xs = np.linspace(-1, 1, width, dtype=np.float32)
+    ys = np.linspace(-1, 1, height, dtype=np.float32)
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    angle = random.uniform(0, math.pi)
+    direction = math.cos(angle) * grid_x + math.sin(angle) * grid_y
+    direction = (direction - direction.min()) / max(1e-6, direction.max() - direction.min())
+    gradient = 1.0 + (direction - 0.5) * random.uniform(0.08, 0.22)
+    return np.clip(array.astype(np.float32) * gradient[..., None], 0, 255).astype(np.uint8)
+
+
+def apply_scan_augmentation(image: Image.Image) -> Image.Image:
+    array = np.asarray(image.convert("RGB"))
+    if random.random() < 0.55:
+        noise = np.random.normal(0, random.uniform(2, 8), array.shape).astype(np.int16)
+        array = np.clip(array.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+    if random.random() < 0.30:
+        array = cv2.GaussianBlur(array, (random.choice([3, 3, 5]),) * 2, 0)
+    if random.random() < 0.28:
+        array = cv2.convertScaleAbs(array, alpha=random.uniform(0.88, 1.04), beta=random.uniform(-8, 8))
+    if random.random() < 0.30:
+        array = add_uneven_lighting(array)
+    output = Image.fromarray(array)
+    if random.random() < 0.42:
+        buffer = io.BytesIO()
+        output.save(buffer, format="JPEG", quality=random.randint(52, 84))
+        buffer.seek(0)
+        output = Image.open(buffer).convert("RGB")
+    return output
+
+
+def save_yolo_label(
+    labels: Sequence[Sequence[float]],
+    image_width: int,
+    image_height: int,
+    label_path: str | os.PathLike,
+) -> None:
+    lines = []
+    for class_id, x1, y1, x2, y2 in labels:
+        x1 = max(0.0, min(float(image_width), float(x1)))
+        x2 = max(0.0, min(float(image_width), float(x2)))
+        y1 = max(0.0, min(float(image_height), float(y1)))
+        y2 = max(0.0, min(float(image_height), float(y2)))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        center_x = (x1 + x2) / 2 / image_width
+        center_y = (y1 + y2) / 2 / image_height
+        width = (x2 - x1) / image_width
+        height = (y2 - y1) / image_height
+        lines.append(f"{int(class_id)} {center_x:.6f} {center_y:.6f} {width:.6f} {height:.6f}")
+    Path(label_path).write_text("\n".join(lines), encoding="utf-8")
+
+
+# -----------------------------------------------------------------------------
+# CLI va lich sinh can bang document
+# -----------------------------------------------------------------------------
+
+def parse_image_sizes(raw: str) -> list[tuple[int, int]]:
     sizes = []
     for item in raw.split(","):
         item = item.strip().lower().replace(" ", "")
         if not item:
             continue
-        if "x" not in item:
-            raise ValueError(f"Kich thuoc khong dung dinh dang WxH: {item}")
-        w_text, h_text = item.split("x", 1)
         try:
-            w = int(w_text)
-            h = int(h_text)
-        except ValueError as exc:
-            raise ValueError(f"Kich thuoc khong phai so nguyen: {item}") from exc
-        if w <= 0 or h <= 0:
+            width_text, height_text = item.split("x", 1)
+            width, height = int(width_text), int(height_text)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Kich thuoc khong dung dinh dang WxH: {item}") from exc
+        if width <= 0 or height <= 0:
             raise ValueError(f"Kich thuoc phai > 0: {item}")
-        sizes.append((w, h))
-
+        sizes.append((width, height))
     if not sizes:
         raise ValueError("--img_sizes khong co kich thuoc hop le")
     return sizes
 
 
-def fit_asset_to_zone(asset, zone, max_fill=0.95):
-    """Thu nho asset neu sau khi rotate no lon hon vung dat."""
-    zx1, zy1, zx2, zy2 = zone
-    zone_w = max(1, zx2 - zx1)
-    zone_h = max(1, zy2 - zy1)
-    max_w = max(1, int(zone_w * max_fill))
-    max_h = max(1, int(zone_h * max_fill))
-    scale = min(1.0, max_w / max(1, asset.width), max_h / max(1, asset.height))
-    if scale >= 1.0:
-        return asset
-    new_size = (max(1, int(asset.width * scale)), max(1, int(asset.height * scale)))
-    return asset.resize(new_size, Image.Resampling.LANCZOS)
-
-
-def choose_position_in_zone(asset, zone, img_w, img_h, center_hint=None):
-    """Chon toa do dat asset trong 1 zone, co the uu tien quanh center_hint."""
-    zx1, zy1, zx2, zy2 = zone
-    min_x, min_y = max(zx1, 0), max(zy1, 0)
-    max_x = min(zx2, img_w) - asset.width
-    max_y = min(zy2, img_h) - asset.height
-
-    if center_hint:
-        sx = int(center_hint[0] - asset.width / 2)
-        sy = int(center_hint[1] - asset.height / 2)
+def choose_output_size(
+    document: DocumentTemplate | None,
+    size_profile: str,
+    fixed_size: tuple[int, int],
+    custom_sizes: Sequence[tuple[int, int]] | None,
+) -> tuple[int, int]:
+    if custom_sizes:
+        candidates = list(custom_sizes)
+    elif size_profile == "native" and document:
+        return document.image.size
+    elif size_profile == "fixed":
+        return fixed_size
     else:
-        sx = random.randint(min_x, max_x) if max_x > min_x else min_x
-        sy = random.randint(min_y, max_y) if max_y > min_y else min_y
-
-    sx = max(0, min(sx, img_w - asset.width))
-    sy = max(0, min(sy, img_h - asset.height))
-    if max_x > min_x:
-        sx = max(min_x, min(sx, max_x))
-    if max_y > min_y:
-        sy = max(min_y, min(sy, max_y))
-    return sx, sy
-
-
-def load_document_backgrounds(documents_dir, region_config=None):
-    """Load cac anh phieu/don mau lam nen that cho synthetic dataset."""
-    paths = []
-    for ext in ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.webp"):
-        paths.extend(glob.glob(os.path.join(documents_dir, ext)))
-    paths = sorted(paths)
-
-    documents = []
-    for p in paths:
-        try:
-            im = Image.open(p)
-            im = ImageOps.exif_transpose(im).convert("RGB")
-            documents.append({
-                "path": p,
-                "image": im,
-                "regions": get_regions_for_document(p, region_config),
-            })
-        except Exception as e:
-            print(f"[warn] Khong doc duoc document {p}: {e}")
-    return documents
-
-
-def prepare_document_background(document_img, width, height):
-    """
-    Dua anh phieu/don mau vao canvas output ma van giu ty le.
-    Tra ve anh nen va bbox noi dung document tren canvas de dat chu ky dung vung.
-    """
-    canvas = Image.new("RGB", (width, height), color=(255, 255, 255))
-    src_w, src_h = document_img.size
-    if src_w <= 0 or src_h <= 0:
-        return canvas, (0, 0, width, height)
-
-    scale = min(width / src_w, height / src_h)
-    new_w = max(1, int(src_w * scale))
-    new_h = max(1, int(src_h * scale))
-    resized = document_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    x = (width - new_w) // 2
-    y = (height - new_h) // 2
-    canvas.paste(resized, (x, y))
-    return canvas, (x, y, x + new_w, y + new_h)
-
-
-# ----------------------------------------------------------------------------
-# 2. SINH CHỮ KÝ GIẢ (fallback khi chưa có dataset chữ ký thật)
-# ----------------------------------------------------------------------------
-
-def _bezier_point(p0, p1, p2, p3, t):
-    x = (1 - t) ** 3 * p0[0] + 3 * (1 - t) ** 2 * t * p1[0] + 3 * (1 - t) * t ** 2 * p2[0] + t ** 3 * p3[0]
-    y = (1 - t) ** 3 * p0[1] + 3 * (1 - t) ** 2 * t * p1[1] + 3 * (1 - t) * t ** 2 * p2[1] + t ** 3 * p3[1]
-    return (x, y)
-
-
-def random_signature_ink_color(alpha=255):
-    """Chon muc xanh lam voi nhieu muc do dam/nhat khac nhau."""
-    r, g, b = random.choice(SIGNATURE_INK_COLORS)
-    # Jitter dong deu giup da dang sac do ma van luon giu mau xanh lam.
-    jitter = random.randint(-12, 12)
-    r = max(0, min(255, r + jitter))
-    g = max(0, min(255, g + jitter))
-    b = max(0, min(255, b + jitter))
-    return (r, g, b, alpha)
-
-
-def recolor_signature_ink(sig_img, color=None):
-    """
-    Doi mau net muc trong anh chu ky RGBA, giu lai alpha va do dam nhat tu anh goc.
-    Ham nay dung cho chu ky that de train khong bi lech khi test gap chu ky mau xanh.
-    """
-    sig_img = sig_img.convert("RGBA")
-    if color is None:
-        color = random_signature_ink_color(alpha=255)
-
-    arr = np.array(sig_img).astype(np.float32)
-    alpha = arr[..., 3]
-    if alpha.max() <= 0:
-        return sig_img
-
-    rgb = arr[..., :3]
-    gray = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32)
-    darkness = 1.0 - gray / 255.0
-    darkness = np.clip(darkness * 1.18, 0.35, 1.0)
-
-    ink = np.array(color[:3], dtype=np.float32)
-    paper = np.array([255, 255, 255], dtype=np.float32)
-    recolored_rgb = paper * (1.0 - darkness[..., None]) + ink * darkness[..., None]
-
-    mask = alpha > 0
-    arr[..., :3][mask] = recolored_rgb[mask]
-    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="RGBA")
-
-
-def generate_fake_signature(width=300, height=120, color=None):
-    """
-    Sinh chữ ký giả bằng nhiều đường cong Bezier nối tiếp nhau, mô phỏng nét bút.
-    Chỉ nên dùng làm dữ liệu bổ sung/tạm thời -- ưu tiên dùng chữ ký thật (CEDAR/GPDS)
-    nếu có, vì chữ ký thật có texture nét bút (độ đậm nhạt, tốc độ nét) mà cách sinh
-    này không mô phỏng được đầy đủ.
-    """
-    img = Image.new("RGBA", (width, height), (255, 255, 255, 0))
-    draw = ImageDraw.Draw(img)
-
-    if color is None:
-        color = random_signature_ink_color(alpha=255)
-
-    n_strokes = random.randint(2, 4)
-    cursor_x = width * 0.05
-    for _ in range(n_strokes):
-        stroke_len = random.uniform(width * 0.25, width * 0.5)
-        p0 = (cursor_x, random.uniform(height * 0.3, height * 0.7))
-        p1 = (cursor_x + stroke_len * 0.3, random.uniform(0, height))
-        p2 = (cursor_x + stroke_len * 0.6, random.uniform(0, height))
-        p3 = (cursor_x + stroke_len, random.uniform(height * 0.3, height * 0.7))
-
-        pts = [_bezier_point(p0, p1, p2, p3, t) for t in np.linspace(0, 1, 60)]
-        line_w = random.randint(2, 4)
-        for i in range(len(pts) - 1):
-            draw.line([pts[i], pts[i + 1]], fill=color, width=line_w)
-
-        cursor_x += stroke_len * random.uniform(0.7, 0.95)
-
-    # Vài nét gạch chân / dấu chấm ngẫu nhiên cho giống chữ ký thật hơn
-    if random.random() < 0.5:
-        yy = height * random.uniform(0.75, 0.9)
-        draw.line([(width * 0.05, yy), (width * 0.7, yy)], fill=color, width=2)
-
-    img = img.filter(ImageFilter.GaussianBlur(0.4))
-    return img
-
-
-def load_real_signatures(signatures_dir):
-    """Load các ảnh chữ ký thật (đã tải sẵn từ CEDAR/GPDS...) và tách nền trắng -> alpha."""
-    paths = glob.glob(os.path.join(signatures_dir, "*.png")) + \
-        glob.glob(os.path.join(signatures_dir, "*.jpg")) + \
-        glob.glob(os.path.join(signatures_dir, "*.jpeg"))
-    signatures = []
-    for p in paths:
-        try:
-            im = Image.open(p).convert("RGB")
-            arr = np.array(im)
-            # Coi pixel gần trắng là nền -> trong suốt
-            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-            alpha = np.where(gray > 235, 0, 255).astype(np.uint8)
-            rgba = np.dstack([arr, alpha])
-            signatures.append(Image.fromarray(rgba, mode="RGBA"))
-        except Exception as e:
-            print(f"[warn] Khong doc duoc {p}: {e}")
-    return signatures
-
-
-# ----------------------------------------------------------------------------
-# 3. SINH CON DẤU (procedural, không cần dataset)
-# ----------------------------------------------------------------------------
-
-def generate_stamp(size=180):
-    """Sinh con dấu tròn màu đỏ kiểu công ty/kho bạc, có viền + chữ vòng cung + ngôi sao/text giữa."""
-    img = Image.new("RGBA", (size, size), (255, 255, 255, 0))
-    draw = ImageDraw.Draw(img)
-    red = (165, 0, 0, 225)  # mau muc dau dam hon mot chut, van giu do trong tu nhien
-
-    margin = 8
-    draw.ellipse([margin, margin, size - margin, size - margin], outline=red, width=4)
-    draw.ellipse([margin + 14, margin + 14, size - margin - 14, size - margin - 14], outline=red, width=2)
-
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
-    except Exception:
-        font = ImageFont.load_default()
-
-    center = size / 2
-    text_center = random.choice(["CTY ABC", "KE TOAN", "DA THU", "PHONG TC-KT"])
-    bbox = draw.textbbox((0, 0), text_center, font=font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.text((center - tw / 2, center - th / 2), text_center, fill=red, font=font)
-
-    # Chữ cong theo viền trên (mô phỏng tên công ty chạy vòng cung)
-    arc_text = "CONG TY TNHH THUONG MAI"
-    radius = size / 2 - 26
-    angle_start = 200
-    angle_step = 10
-    for i, ch in enumerate(arc_text[:16]):
-        angle = math.radians(angle_start - i * angle_step)
-        x = center + radius * math.cos(angle)
-        y = center + radius * math.sin(angle)
-        char_img = Image.new("RGBA", (20, 20), (255, 255, 255, 0))
-        cd = ImageDraw.Draw(char_img)
-        cd.text((2, 2), ch, fill=red, font=font)
-        rot_angle = -(angle_start - i * angle_step) - 90
-        char_img = char_img.rotate(rot_angle, expand=True)
-        img.paste(char_img, (int(x - char_img.width / 2), int(y - char_img.height / 2)), char_img)
-
-    # Làm mực hơi loang/nhạt không đều như dấu đóng tay thật
-    arr = np.array(img)
-    noise = np.random.normal(0, 12, arr[..., 3].shape).astype(np.int16)
-    alpha = arr[..., 3].astype(np.int16) + noise
-    arr[..., 3] = np.clip(alpha, 0, 255).astype(np.uint8)
-    img = Image.fromarray(arr, mode="RGBA")
-    img = img.rotate(random.uniform(-15, 15), expand=True)
-    return img
-
-
-# ----------------------------------------------------------------------------
-# 4. GHÉP (COMPOSITE) SIGNATURE + STAMP LÊN NỀN, CÓ CHO PHÉP CHỒNG LẤN
-# ----------------------------------------------------------------------------
-
-def paste_with_alpha(bg, fg, x, y, opacity=1.0):
-    """Dán ảnh fg (RGBA) lên bg tại (x,y) với độ mờ opacity, trả về bbox (x1,y1,x2,y2)."""
-    fg = fg.copy()
-    if opacity < 1.0:
-        alpha = fg.split()[3].point(lambda p: int(p * opacity))
-        fg.putalpha(alpha)
-    bg.paste(fg, (x, y), fg)
-    return (x, y, x + fg.width, y + fg.height)
-
-
-def compose_sample(
-    bg_size=(1000, 1400),
-    signatures_pool=None,
-    documents_pool=None,
-    signature_scale=2.8125,
-    stamp_scale=2.0,
-    min_signatures=2,
-    max_signatures=5,
-):
-    """
-    Sinh 1 sample hoàn chỉnh: nền + (có thể có) chữ ký + (có thể có) con dấu,
-    trả về ảnh PIL và list nhãn [(class_id, x1,y1,x2,y2), ...] theo pixel.
-
-    class_id: 0 = signature, 1 = stamp
-    """
-    W, H = bg_size
-    document_regions = None
-    if documents_pool:
-        document = random.choice(documents_pool)
-        document_img = document["image"]
-        document_regions = document.get("regions")
-        img, content_box = prepare_document_background(document_img, W, H)
-    else:
-        img = generate_background(W, H)
-        content_box = (0, 0, W, H)
-    labels = []
-
-    # Vung dat chu ky/moc co the cau hinh rieng theo tung document bang --regions_json.
-    signature_zone_defs = DEFAULT_SIGNATURE_ZONES
-    stamp_zone_defs = None
-    stamp_allowed = True
-    if document_regions:
-        signature_zone_defs = document_regions.get("signature_zones") or DEFAULT_SIGNATURE_ZONES
-        if "stamp_zones" in document_regions:
-            stamp_zone_defs = document_regions.get("stamp_zones")
-            stamp_allowed = bool(stamp_zone_defs)
-
-    zones = normalized_zones_to_pixel_zones(signature_zone_defs, content_box)
-    if not zones:
-        zones = normalized_zones_to_pixel_zones(DEFAULT_SIGNATURE_ZONES, content_box)
-    stamp_zones = normalized_zones_to_pixel_zones(stamp_zone_defs, content_box) if stamp_zone_defs else []
-
-    # Quyết định kịch bản cho sample này
-    r = random.random()
-    if r < 0.10:
-        scenario = "empty"          # không có gì (negative sample -- quan trọng để giảm false positive)
-    elif r < 0.45:
-        scenario = "sig_only"
-    elif r < 0.70:
-        scenario = "sig_and_stamp_separate"
-    else:
-        scenario = "sig_and_stamp_overlap"   # trường hợp khó: dấu đè lên chữ ký
-
-    if scenario == "empty":
-        pass
-
-    else:
-        stamp_zone = None
-        if scenario in ("sig_and_stamp_separate", "sig_and_stamp_overlap") and stamp_allowed and stamp_zones:
-            stamp_zone = random.choice(stamp_zones)
-
-        if len(zones) <= 1:
-            signature_count = 1
-        else:
-            min_count = min(max(1, min_signatures), len(zones))
-            max_count = min(max(min_count, max_signatures), len(zones))
-            signature_count = random.randint(min_count, max_count)
-
-        selected_zones = random.sample(zones, signature_count)
-        if stamp_zone:
-            stamp_cx = (stamp_zone[0] + stamp_zone[2]) / 2
-            stamp_cy = (stamp_zone[1] + stamp_zone[3]) / 2
-            director_zone = min(
-                zones,
-                key=lambda z: ((z[0] + z[2]) / 2 - stamp_cx) ** 2 + ((z[1] + z[3]) / 2 - stamp_cy) ** 2,
-            )
-            if director_zone not in selected_zones:
-                selected_zones[0] = director_zone
-
-        sig_boxes = []
-        for zone in selected_zones:
-            zx1, zy1, zx2, zy2 = zone
-
-            # --- Lay 1 chu ky (that neu co, khong thi sinh gia) ---
-            if signatures_pool:
-                sig = random.choice(signatures_pool).copy()
-            else:
-                sig = generate_fake_signature(
-                    width=random.randint(220, 320), height=random.randint(80, 130)
-                )
-            sig = recolor_signature_ink(sig)
-
-            # Chuan hoa kich thuoc chu ky theo ty le vung ky, khong phu thuoc
-            # do phan giai goc cua anh chu ky upload vao signatures_dir.
-            zone_w = zx2 - zx1
-            signature_size_bucket = random.choice([
-                (0.18, 0.28),  # nho
-                (0.28, 0.40),  # vua
-                (0.40, 0.55),  # lon
-            ])
-            target_w = zone_w * random.uniform(*signature_size_bucket) * signature_scale
-            scale_factor = target_w / sig.width
-            new_w = max(20, int(sig.width * scale_factor))
-            new_h = max(10, int(sig.height * scale_factor))
-            sig = sig.resize((new_w, new_h))
-
-            angle = random.uniform(-8, 8)
-            sig = sig.rotate(angle, expand=True)
-            sig = fit_asset_to_zone(sig, zone)
-
-            # Uu tien dat trong vung ky, nhung van kep cung theo bien anh output.
-            sx, sy = choose_position_in_zone(sig, zone, W, H)
-
-            sig_opacity = random.uniform(0.88, 1.0)
-            sig_box = paste_with_alpha(img, sig, sx, sy, opacity=sig_opacity)
-            sig_boxes.append(sig_box)
-            labels.append((0,) + sig_box)  # class 0 = signature
-
-        if scenario in ("sig_and_stamp_separate", "sig_and_stamp_overlap") and stamp_allowed:
-            # QUAN TRONG: kich thuoc dau cung phai theo TY LE trang/vung ky,
-            # khong dung so pixel co dinh (130-190px) -- neu doi img_w/img_h
-            # (vd sinh anh 640x896 thay vi 1000x1400) thi dau co dinh se thanh
-            # qua to hoac qua nho mot cach khong nhat quan.
-            if stamp_zone is None:
-                stamp_zone = random.choice(stamp_zones) if stamp_zones else None
-            zone_w = selected_zones[0][2] - selected_zones[0][0]
-            stamp_ref_w = (stamp_zone[2] - stamp_zone[0]) if stamp_zone else zone_w
-            stamp_size_bucket = random.choice([
-                (0.22, 0.32),  # nho/nhat
-                (0.32, 0.44),  # vua
-                (0.44, 0.56),  # lon/de thay
-            ])
-            stamp_size = int(stamp_ref_w * random.uniform(*stamp_size_bucket) * stamp_scale)
-            stamp_size = max(60, stamp_size)  # tranh dau qua nho khi zone hep
-            stamp = generate_stamp(size=stamp_size)
-            if stamp_zone:
-                stamp = fit_asset_to_zone(stamp, stamp_zone, max_fill=0.95)
-            stamp_opacity = random.uniform(0.70, 0.92)
-
-            if stamp_zone:
-                center_hint = None
-                if scenario == "sig_and_stamp_overlap" and sig_boxes:
-                    stamp_cx = (stamp_zone[0] + stamp_zone[2]) / 2
-                    stamp_cy = (stamp_zone[1] + stamp_zone[3]) / 2
-                    nearest_sig_box = min(
-                        sig_boxes,
-                        key=lambda b: ((b[0] + b[2]) / 2 - stamp_cx) ** 2 + ((b[1] + b[3]) / 2 - stamp_cy) ** 2,
-                    )
-                    center_hint = (
-                        int((nearest_sig_box[0] + nearest_sig_box[2]) / 2),
-                        int((nearest_sig_box[1] + nearest_sig_box[3]) / 2),
-                    )
-                stx, sty = choose_position_in_zone(stamp, stamp_zone, W, H, center_hint=center_hint)
-            elif scenario == "sig_and_stamp_overlap":
-                # Cố tình đặt tâm con dấu lệch vào vùng chữ ký để tạo occlusion 30-70%
-                overlap_ratio = random.uniform(0.3, 0.7)
-                target_sig_box = random.choice(sig_boxes)
-                cx = int(target_sig_box[0] + (target_sig_box[2] - target_sig_box[0]) * overlap_ratio)
-                cy = int((target_sig_box[1] + target_sig_box[3]) / 2)
-                stx = cx - stamp.width // 2
-                sty = cy - stamp.height // 2
-            else:
-                # Đặt cách xa chữ ký, không chồng lấn
-                target_sig_box = random.choice(sig_boxes)
-                stx = target_sig_box[2] + random.randint(10, 40)
-                sty = target_sig_box[1] - random.randint(0, 20)
-                if stx + stamp.width > W - 20:
-                    stx = max(20, target_sig_box[0] - stamp.width - 20)
-
-            stx = max(0, min(stx, W - stamp.width))
-            sty = max(0, min(sty, H - stamp.height))
-
-            stamp_box = paste_with_alpha(img, stamp, stx, sty, opacity=stamp_opacity)
-            labels.append((1,) + stamp_box)  # class 1 = stamp
-            # Lưu ý quan trọng: box của signature GIỮ NGUYÊN như lúc dán,
-            # KHÔNG cắt bớt phần bị dấu che -- vì ground truth phản ánh
-            # vùng chữ ký thật sự tồn tại, kể cả khi bị che một phần.
-
-    return img, labels
-
-
-# ----------------------------------------------------------------------------
-# 5. AUGMENTATION MÔ PHỎNG ẢNH SCAN THẬT
-# ----------------------------------------------------------------------------
-
-def transform_labels_affine(labels, matrix, img_w, img_h, min_box_size=4):
-    """Bien doi bbox theo ma tran affine 2x3, clamp lai trong bien anh."""
-    transformed_labels = []
-    m = np.asarray(matrix, dtype=np.float32)
-
-    for cls, x1, y1, x2, y2 in labels:
-        corners = np.array([
-            [x1, y1, 1.0],
-            [x2, y1, 1.0],
-            [x2, y2, 1.0],
-            [x1, y2, 1.0],
-        ], dtype=np.float32)
-        warped = corners @ m.T
-        nx1 = float(np.clip(warped[:, 0].min(), 0, img_w))
-        ny1 = float(np.clip(warped[:, 1].min(), 0, img_h))
-        nx2 = float(np.clip(warped[:, 0].max(), 0, img_w))
-        ny2 = float(np.clip(warped[:, 1].max(), 0, img_h))
-        if nx2 - nx1 < min_box_size or ny2 - ny1 < min_box_size:
-            continue
-        transformed_labels.append((cls, nx1, ny1, nx2, ny2))
-
-    return transformed_labels
-
-
-def apply_capture_geometry_augmentation(pil_img, labels):
-    """
-    Mo phong scan/chup bi lech nhe: rotate, translate, scale nho.
-    Anh giu nguyen kich thuoc, label duoc bien doi cung anh.
-    """
-    if random.random() > 0.75:
-        return pil_img, labels
-
-    img = np.array(pil_img.convert("RGB"))
-    img_h, img_w = img.shape[:2]
-    angle = random.uniform(-2.5, 2.5)
-    scale = random.uniform(0.96, 1.03)
-    tx = random.uniform(-0.025, 0.025) * img_w
-    ty = random.uniform(-0.025, 0.025) * img_h
-
-    matrix = cv2.getRotationMatrix2D((img_w / 2, img_h / 2), angle, scale)
-    matrix[0, 2] += tx
-    matrix[1, 2] += ty
-
-    warped = cv2.warpAffine(
-        img,
-        matrix,
-        (img_w, img_h),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(255, 255, 255),
-    )
-    transformed_labels = transform_labels_affine(labels, matrix, img_w, img_h)
-    return Image.fromarray(warped), transformed_labels
-
-
-def add_uneven_lighting(img):
-    """Them gradient sang/toi nhe nhu anh chup dien thoai/scan khong deu den."""
-    img_f = img.astype(np.float32)
-    h, w = img.shape[:2]
-    xs = np.linspace(-1, 1, w, dtype=np.float32)
-    ys = np.linspace(-1, 1, h, dtype=np.float32)
-    grid_x, grid_y = np.meshgrid(xs, ys)
-    angle = random.uniform(0, math.pi)
-    direction = math.cos(angle) * grid_x + math.sin(angle) * grid_y
-    direction = (direction - direction.min()) / max(1e-6, direction.max() - direction.min())
-    strength = random.uniform(0.10, 0.28)
-    gradient = 1.0 + (direction - 0.5) * strength
-    img_f *= gradient[..., None]
-    return np.clip(img_f, 0, 255).astype(np.uint8)
-
-
-def apply_scan_augmentation(pil_img):
-    """
-    Mô phỏng artifact scan/photocopy không làm thay đổi hình học ảnh.
-
-    Lưu ý: bbox đã được tạo trước khi gọi hàm này. Vì vậy không xoay/skew/crop
-    toàn ảnh ở đây, nếu không nhãn YOLO sẽ bị lệch. Các augmentation hình học
-    nên để Ultralytics xử lý trong train.py vì thư viện sẽ biến đổi bbox cùng ảnh.
-    """
-    img = np.array(pil_img.convert("RGB"))
-
-    # 1. Nhiễu hạt kiểu scan
-    if random.random() < 0.6:
-        noise = np.random.normal(0, random.uniform(3, 10), img.shape).astype(np.int16)
-        img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-
-    # 2. Làm mờ nhẹ (mô phỏng photocopy/out of focus)
-    if random.random() < 0.4:
-        k = random.choice([3, 5])
-        img = cv2.GaussianBlur(img, (k, k), 0)
-
-    # 3. Giảm tương phản nhẹ / ánh sáng không đều (mô phỏng scan ám vàng, thiếu sáng)
-    if random.random() < 0.3:
-        alpha = random.uniform(0.85, 1.05)
-        beta = random.uniform(-10, 10)
-        img = cv2.convertScaleAbs(img, alpha=alpha, beta=beta)
-
-    # 4. Anh sang khong deu (dien thoai chup duoi den phong/scan bi lech sang)
-    if random.random() < 0.35:
-        img = add_uneven_lighting(img)
-
-    out = Image.fromarray(img)
-
-    # 5. Nén JPEG artifact (lưu rồi đọc lại với quality thấp)
-    if random.random() < 0.5:
-        import io
-        buf = io.BytesIO()
-        out.save(buf, format="JPEG", quality=random.randint(45, 80))
-        buf.seek(0)
-        out = Image.open(buf).convert("RGB")
-
-    return out
-
-
-# ----------------------------------------------------------------------------
-# 6. XUẤT FORMAT YOLO
-# ----------------------------------------------------------------------------
-
-def save_yolo_label(labels, img_w, img_h, label_path):
-    lines = []
-    for cls, x1, y1, x2, y2 in labels:
-        x1, x2 = max(0, x1), min(img_w, x2)
-        y1, y2 = max(0, y1), min(img_h, y2)
-        if x2 <= x1 or y2 <= y1:
-            continue
-        cx = (x1 + x2) / 2 / img_w
-        cy = (y1 + y2) / 2 / img_h
-        w = (x2 - x1) / img_w
-        h = (y2 - y1) / img_h
-        lines.append(f"{cls} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
-    with open(label_path, "w") as f:
-        f.write("\n".join(lines))
-
-
-# ----------------------------------------------------------------------------
-# 7. MAIN
-# ----------------------------------------------------------------------------
-
-def main():
-    parser = argparse.ArgumentParser()
+        candidates = list(DEFAULT_REALISTIC_SIZES)
+
+    if document:
+        is_landscape = document.image.width > document.image.height
+        matching = [size for size in candidates if (size[0] > size[1]) == is_landscape]
+        if matching:
+            candidates = matching
+    return random.choice(candidates)
+
+
+def balanced_document_schedule(
+    documents: Sequence[DocumentTemplate],
+    sample_count: int,
+) -> list[DocumentTemplate | None]:
+    if not documents:
+        return [None] * sample_count
+    schedule = []
+    while len(schedule) < sample_count:
+        cycle = list(documents)
+        random.shuffle(cycle)
+        schedule.extend(cycle)
+    return schedule[:sample_count]
+
+
+def validate_probability(value: float, argument_name: str) -> None:
+    if not 0 <= value <= 1:
+        raise ValueError(f"{argument_name} phai nam trong khoang 0..1")
+
+
+def build_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Sinh dataset YOLO tu signatures_dir va documents")
     parser.add_argument("--num_samples", type=int, default=200)
-    parser.add_argument("--out_dir", type=str, default="dataset")
-    parser.add_argument("--signatures_dir", type=str, default=None,
-                            help="Thư mục chứa ảnh chữ ký thật đã tải (CEDAR/GPDS...). "
-                                "Nếu không cung cấp, script sẽ tự sinh chữ ký giả.")
-    parser.add_argument("--documents_dir", type=str, default=None,
-                            help="Thư mục chứa ảnh phiếu/đơn mẫu dùng làm nền thật. "
-                                "Nếu không cung cấp, script sẽ tự vẽ nền chứng từ giả.")
-    parser.add_argument("--regions_json", type=str, default=None,
-                            help="File JSON khai báo vùng đặt chữ ký/con dấu theo từng document. "
-                                "Tọa độ normalized [x1,y1,x2,y2] theo ảnh document gốc.")
-    parser.add_argument("--signature_scale", type=float, default=2.8125,
-                            help="He so phong to chu ky so voi kich thuoc mac dinh.")
-    parser.add_argument("--stamp_scale", type=float, default=2.0,
-                            help="He so phong to con dau/moc so voi kich thuoc mac dinh.")
-    parser.add_argument("--min_signatures", type=int, default=2,
-                            help="So chu ky toi thieu tren moi document co chu ky.")
-    parser.add_argument("--max_signatures", type=int, default=5,
-                            help="So chu ky toi da tren moi document co chu ky.")
-    parser.add_argument("--img_w", type=int, default=1000)
-    parser.add_argument("--img_h", type=int, default=1400)
-    parser.add_argument("--size_profile", choices=["fixed", "realistic"], default="realistic",
-                            help="'fixed' dung --img_w/--img_h; 'realistic' random nhieu ti le "
-                                "portrait/landscape theo DEFAULT_REALISTIC_SIZES.")
-    parser.add_argument("--img_sizes", type=str, default=None,
-                            help="Danh sach kich thuoc custom dang WxH, cach nhau bang dau phay, "
-                                "vd 800x1100,1000x1400,1600x1000. Neu truyen tham so nay "
-                                "se uu tien hon --size_profile.")
-    parser.add_argument("--no_geometry_aug", action="store_true",
-                            help="Tat rotate/translate/scale nhe sau khi ghep object. Dung khi can debug label.")
-    parser.add_argument("--seed", type=int, default=None,
-                            help="Seed tuy chon de lap lai dataset synthetic.")
-    args = parser.parse_args()
+    parser.add_argument("--out_dir", default="dataset_generated")
+    parser.add_argument("--signatures_dir", default="signatures_dir")
+    parser.add_argument("--documents_dir", default="documents")
+    parser.add_argument("--regions_json", default="document_regions.json")
+    parser.add_argument("--signature_scale", type=float, default=1.0)
+    parser.add_argument("--stamp_scale", type=float, default=1.0)
+    parser.add_argument("--min_signatures", type=int, default=1)
+    parser.add_argument("--max_signatures", type=int, default=5)
+    parser.add_argument("--blue_ink_probability", type=float, default=0.78)
+    parser.add_argument("--clean_signature_probability", type=float, default=0.70,
+                        help="Xac suat uu tien nhom image/Screenshot sach thay vi crop *_sig_* co the dinh chu in")
+    parser.add_argument("--negative_probability", type=float, default=0.08)
+    parser.add_argument("--stamp_probability", type=float, default=0.50)
+    parser.add_argument("--stamp_overlap_probability", type=float, default=0.55)
+    parser.add_argument("--size_profile", choices=["native", "fixed", "realistic"], default="native")
+    parser.add_argument("--img_w", type=int, default=1191)
+    parser.add_argument("--img_h", type=int, default=1685)
+    parser.add_argument("--img_sizes", default=None,
+                        help="Danh sach kich thuoc WxH cach nhau boi dau phay; uu tien dung kich thuoc cung chieu document")
+    parser.add_argument("--no_geometry_aug", action="store_true")
+    parser.add_argument("--no_scan_aug", action="store_true")
+    parser.add_argument("--allow_fake_signatures", action="store_true",
+                        help="Cho phep fallback chu ky Bezier khi signatures_dir khong hop le/rong")
+    parser.add_argument("--allow_synthetic_documents", action="store_true",
+                        help="Cho phep fallback nen tu ve khi documents_dir khong hop le/rong")
+    parser.add_argument("--allow_region_mismatch", action="store_true",
+                        help="Khong dung chuong trinh khi regions_json thieu/thua ten document")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Cho phep ghi de cac sample trung ten trong out_dir; khong xoa file cu")
+    parser.add_argument("--validate_only", action="store_true")
+    parser.add_argument("--seed", type=int, default=None)
+    return parser
 
+
+def main() -> None:
+    args = build_argument_parser().parse_args()
     if args.seed is not None:
         random.seed(args.seed)
         np.random.seed(args.seed)
 
-    if args.signature_scale <= 0:
-        raise ValueError("--signature_scale phai > 0")
-    if args.stamp_scale <= 0:
-        raise ValueError("--stamp_scale phai > 0")
-    if args.min_signatures <= 0:
-        raise ValueError("--min_signatures phai > 0")
-    if args.max_signatures < args.min_signatures:
-        raise ValueError("--max_signatures phai >= --min_signatures")
+    if args.num_samples <= 0:
+        raise ValueError("--num_samples phai > 0")
+    if args.signature_scale <= 0 or args.stamp_scale <= 0:
+        raise ValueError("--signature_scale va --stamp_scale phai > 0")
+    if args.min_signatures <= 0 or args.max_signatures < args.min_signatures:
+        raise ValueError("Can 0 < --min_signatures <= --max_signatures")
     if args.img_w <= 0 or args.img_h <= 0:
-        raise ValueError("--img_w/--img_h phai > 0")
+        raise ValueError("--img_w va --img_h phai > 0")
+    validate_probability(args.blue_ink_probability, "--blue_ink_probability")
+    validate_probability(args.clean_signature_probability, "--clean_signature_probability")
+    validate_probability(args.negative_probability, "--negative_probability")
+    validate_probability(args.stamp_probability, "--stamp_probability")
+    validate_probability(args.stamp_overlap_probability, "--stamp_overlap_probability")
 
-    if args.img_sizes:
-        output_sizes = parse_image_sizes(args.img_sizes)
-    elif args.size_profile == "realistic":
-        output_sizes = DEFAULT_REALISTIC_SIZES
+    signatures_path = Path(args.signatures_dir)
+    if signatures_path.is_dir():
+        signatures = load_real_signatures(signatures_path)
     else:
-        output_sizes = [(args.img_w, args.img_h)]
-
-    img_dir = os.path.join(args.out_dir, "images")
-    lbl_dir = os.path.join(args.out_dir, "labels")
-    os.makedirs(img_dir, exist_ok=True)
-    os.makedirs(lbl_dir, exist_ok=True)
-
-    signatures_pool = None
-    if args.signatures_dir and os.path.isdir(args.signatures_dir):
-        signatures_pool = load_real_signatures(args.signatures_dir)
-        print(f"Da load {len(signatures_pool)} chu ky that tu {args.signatures_dir}")
-    else:
-        print("Khong co --signatures_dir hop le -> se tu sinh chu ky gia (Bezier).")
-
-    region_config = None
-    if args.regions_json:
-        if os.path.isfile(args.regions_json):
-            region_config = load_document_region_config(args.regions_json)
-            print(f"Da load cau hinh vung dat chu ky/moc tu {args.regions_json}")
-        else:
-            raise FileNotFoundError(f"Khong tim thay --regions_json: {args.regions_json}")
-
-    documents_pool = None
-    if args.documents_dir and os.path.isdir(args.documents_dir):
-        documents_pool = load_document_backgrounds(args.documents_dir, region_config=region_config)
-        print(f"Da load {len(documents_pool)} phieu/don mau tu {args.documents_dir}")
-        if not documents_pool:
-            print("[warn] Khong load duoc document nao -> se tu ve nen chung tu gia.")
-            documents_pool = None
-    else:
-        print("Khong co --documents_dir hop le -> se tu ve nen chung tu gia.")
-
-    print("Kich thuoc output se random trong:", ", ".join(f"{w}x{h}" for w, h in output_sizes))
-
-    for i in range(args.num_samples):
-        img_w, img_h = random.choice(output_sizes)
-        img, labels = compose_sample(
-            bg_size=(img_w, img_h),
-            signatures_pool=signatures_pool,
-            documents_pool=documents_pool,
-            signature_scale=args.signature_scale,
-            stamp_scale=args.stamp_scale,
-            min_signatures=args.min_signatures,
-            max_signatures=args.max_signatures,
-        )
-        if not args.no_geometry_aug:
-            img, labels = apply_capture_geometry_augmentation(img, labels)
-        img = apply_scan_augmentation(img)
-
-        fname = f"sample_{i:05d}"
-        img.save(os.path.join(img_dir, fname + ".jpg"), quality=90)
-        save_yolo_label(labels, img_w, img_h, os.path.join(lbl_dir, fname + ".txt"))
-
-        if (i + 1) % 100 == 0:
-            print(f"Da sinh {i + 1}/{args.num_samples} samples")
-
-    # Ghi file YAML tham khảo cho dataset CHƯA split. Không dùng file này để train
-    # vì train/val sẽ trỏ cùng thư mục và làm metric validation bị ảo.
-    yaml_path = os.path.join(args.out_dir, "data_unsplit_DO_NOT_TRAIN.yaml")
-    with open(yaml_path, "w") as f:
-        f.write(
-            "# Dataset chua split: KHONG dung file nay de train/validate.\n"
-            "# Hay chay split_dataset.py de tao data.yaml rieng cho train/val.\n"
-            f"path: {os.path.abspath(args.out_dir)}\n"
-            f"train: images\n"
-            f"val: images\n"
-            f"names:\n  0: signature\n  1: stamp\n"
+        signatures = []
+    if not signatures and not args.allow_fake_signatures:
+        raise FileNotFoundError(
+            f"Khong load duoc chu ky nao tu {signatures_path}. "
+            "Dung --allow_fake_signatures neu muon fallback Bezier."
         )
 
-    print(f"\nHoan tat. Dataset tai: {os.path.abspath(args.out_dir)}")
-    print(f"File tham khao dataset chua split: {yaml_path}")
-    print("Buoc tiep theo nen lam:")
-    print(f"  python split_dataset.py --src_dir {args.out_dir} --dst_dir {args.out_dir}_split --val_ratio 0.15")
-    print("Sau do train voi file data.yaml da split, vi du:")
-    print(f"  python train.py --data {args.out_dir}_split/data.yaml --model yolo11s.pt --imgsz 1024 --epochs 100")
+    regions_path = Path(args.regions_json)
+    region_config = load_document_region_config(regions_path) if regions_path.is_file() else None
+    if not region_config and not args.allow_region_mismatch:
+        raise FileNotFoundError(f"Khong tim thay regions_json: {regions_path}")
+
+    documents_path = Path(args.documents_dir)
+    documents = load_document_backgrounds(
+        documents_path,
+        region_config=region_config,
+        strict_regions=not args.allow_region_mismatch,
+    ) if documents_path.is_dir() else []
+    if not documents and not args.allow_synthetic_documents:
+        raise FileNotFoundError(
+            f"Khong load duoc document nao tu {documents_path}. "
+            "Dung --allow_synthetic_documents neu muon fallback nen tu ve."
+        )
+
+    group_counts = {
+        group: sum(asset.source_group == group for asset in signatures)
+        for group in sorted({asset.source_group for asset in signatures})
+    }
+    print(f"Da load {len(signatures)} chu ky hop le tu {signatures_path}")
+    if group_counts:
+        print("  " + ", ".join(f"{name}: {count}" for name, count in group_counts.items()))
+    print(f"Da load {len(documents)} document tu {documents_path}")
+    if documents:
+        portrait = sum(document.image.height > document.image.width for document in documents)
+        landscape = len(documents) - portrait
+        signature_zone_count = sum(len(document.signature_zones) for document in documents)
+        stamp_zone_count = sum(len(document.stamp_zones) for document in documents)
+        print(
+            f"  portrait: {portrait}, landscape: {landscape}, "
+            f"signature zones: {signature_zone_count}, stamp zones: {stamp_zone_count}"
+        )
+
+    if args.validate_only:
+        print("Kiem tra dau vao thanh cong; khong sinh dataset (--validate_only).")
+        return
+
+    custom_sizes = parse_image_sizes(args.img_sizes) if args.img_sizes else None
+    output_root = Path(args.out_dir)
+    image_dir = output_root / "images"
+    label_dir = output_root / "labels"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    label_dir.mkdir(parents=True, exist_ok=True)
+
+    target_names = [f"sample_{index:05d}" for index in range(args.num_samples)]
+    collisions = [
+        name for name in target_names
+        if (image_dir / f"{name}.jpg").exists() or (label_dir / f"{name}.txt").exists()
+    ]
+    if collisions and not args.overwrite:
+        raise FileExistsError(
+            f"{len(collisions)} sample da ton tai trong {output_root}. "
+            "Chon out_dir moi hoac dung --overwrite de ghi de dung cac ten trung."
+        )
+
+    schedule = balanced_document_schedule(documents, args.num_samples)
+    manifest_path = output_root / "manifest.jsonl"
+    manifest_mode = "w" if args.overwrite or not manifest_path.exists() else "a"
+    signature_label_count = 0
+    stamp_label_count = 0
+    scenario_counts: dict[str, int] = {}
+
+    with manifest_path.open(manifest_mode, encoding="utf-8") as manifest:
+        for index, document in enumerate(schedule):
+            output_size = choose_output_size(
+                document,
+                args.size_profile,
+                (args.img_w, args.img_h),
+                custom_sizes,
+            )
+            image, labels, metadata = compose_sample(
+                bg_size=output_size,
+                signatures_pool=signatures,
+                document=document,
+                signature_scale=args.signature_scale,
+                stamp_scale=args.stamp_scale,
+                min_signatures=args.min_signatures,
+                max_signatures=args.max_signatures,
+                blue_ink_probability=args.blue_ink_probability,
+                clean_signature_probability=args.clean_signature_probability,
+                negative_probability=args.negative_probability,
+                stamp_probability=args.stamp_probability,
+                stamp_overlap_probability=args.stamp_overlap_probability,
+            )
+            if not args.no_geometry_aug:
+                image, labels = apply_capture_geometry_augmentation(image, labels)
+            if not args.no_scan_aug:
+                image = apply_scan_augmentation(image)
+
+            sample_name = target_names[index]
+            image.save(image_dir / f"{sample_name}.jpg", quality=92, subsampling=0)
+            save_yolo_label(labels, image.width, image.height, label_dir / f"{sample_name}.txt")
+
+            signature_label_count += sum(label[0] == CLASS_SIGNATURE for label in labels)
+            stamp_label_count += sum(label[0] == CLASS_STAMP for label in labels)
+            scenario = metadata["scenario"]
+            scenario_counts[scenario] = scenario_counts.get(scenario, 0) + 1
+            metadata.update({
+                "sample": sample_name,
+                "width": image.width,
+                "height": image.height,
+                "label_count": len(labels),
+            })
+            manifest.write(json.dumps(metadata, ensure_ascii=False) + "\n")
+
+            if (index + 1) % 100 == 0 or index + 1 == args.num_samples:
+                print(f"Da sinh {index + 1}/{args.num_samples} samples")
+
+    yaml_path = output_root / "data_unsplit_DO_NOT_TRAIN.yaml"
+    yaml_path.write_text(
+        "# Dataset chua split; hay chay split_dataset.py truoc khi train.\n"
+        f"path: {output_root.resolve().as_posix()}\n"
+        "train: images\n"
+        "val: images\n"
+        "names:\n"
+        "  0: signature\n"
+        "  1: stamp\n",
+        encoding="utf-8",
+    )
+
+    print(f"Hoan tat: {output_root.resolve()}")
+    print(f"Nhan signature: {signature_label_count}; stamp: {stamp_label_count}")
+    print("Scenario: " + ", ".join(f"{name}={count}" for name, count in sorted(scenario_counts.items())))
+    print(f"Manifest: {manifest_path}")
+    print(
+        f"Buoc tiep theo: python split_dataset.py --src_dir {args.out_dir} "
+        f"--dst_dir {args.out_dir}_split --val_ratio 0.15"
+    )
 
 
 if __name__ == "__main__":

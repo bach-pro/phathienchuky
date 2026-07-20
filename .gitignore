@@ -1,7 +1,6 @@
 dataset/
 dataset_split/
 runs/
-signatures_dir/
 signatures_dir_split/
 signatures/
 __pycache__/
@@ -10,3 +9,4 @@ dataset_documents_multisig/
 real_test/
 *.pt
 prediction_crops/
+.cache/

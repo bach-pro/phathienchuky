@@ -72,9 +72,11 @@ python generate_dataset.py `
   --documents_dir documents `
   --signatures_dir signatures_dir `
   --regions_json document_regions.json `
-  --signature_scale 1.875 `
-  --stamp_scale 2.0 `
-  --min_signatures 2 `
+  --size_profile native `
+  --signature_scale 1.0 `
+  --stamp_scale 1.0 `
+  --clean_signature_probability 0.70 `
+  --min_signatures 1 `
   --max_signatures 5
 ```
 
