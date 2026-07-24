@@ -72,13 +72,34 @@ python generate_dataset.py `
   --documents_dir documents `
   --signatures_dir signatures_dir `
   --regions_json document_regions.json `
-  --size_profile native `
+  --size_profile realistic `
+  --size_jitter 0.12 `
   --signature_scale 1.0 `
   --stamp_scale 1.0 `
   --clean_signature_probability 0.70 `
   --min_signatures 1 `
   --max_signatures 5
 ```
+
+Mac dinh `realistic` se chon ngau nhien nhieu do phan giai portrait/landscape
+va bien thien them `+/-12%`. Document luon duoc giu dung ty le, khong bi keo meo.
+Moi kich thuoc thuc te cua sample cung duoc ghi vao `manifest.jsonl`.
+
+De dung mot danh sach kich thuoc cu the (danh sach nay ghi de `size_profile`):
+
+```powershell
+python generate_dataset.py `
+  --num_samples 2000 `
+  --out_dir dataset_documents_multisize `
+  --img_sizes "640x896,768x1024,800x1100,1000x1400,1200x1600,896x640,1024x768,1100x800,1400x1000,1600x1200"
+```
+
+Danh sach tren gom ca kich thuoc doc va ngang. Voi moi document, script se uu
+tien chon cac kich thuoc co cung chieu, nen anh ngang van nam ngang va anh doc
+van nam doc.
+
+Neu can giu nguyen kich thuoc anh document dau vao, dung `--size_profile native`.
+Neu can tat bien thien quanh cac kich thuoc realistic, dung `--size_jitter 0`.
 
 Output se nam trong:
 

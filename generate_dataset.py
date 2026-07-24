@@ -10,7 +10,8 @@ Mac dinh script:
 - nap truc tiep ``signatures_dir``, ``documents`` va ``document_regions.json``;
 - lam sach, tach nen va crop sat net muc cua tung chu ky;
 - dung moi document gan nhu deu nhau thay vi random lech phan bo;
-- giu nguyen chieu va ty le goc cua document (portrait/landscape);
+- sinh anh o nhieu do phan giai thuc te, giu dung chieu document
+  (portrait/landscape) va khong keo meo noi dung;
 - xuat anh, nhan YOLO va ``manifest.jsonl`` de truy vet nguon mau.
 
 Vi du:
@@ -50,9 +51,14 @@ DEFAULT_SIGNATURE_ZONES = [
     [0.55, 0.80, 0.94, 0.96],
 ]
 DEFAULT_REALISTIC_SIZES = [
+    # Portrait
+    (640, 896),
+    (768, 1024),
     (800, 1100),
     (1000, 1400),
     (1200, 1600),
+    # Landscape
+    (1280, 720),
     (1600, 1000),
     (1920, 1080),
 ]
@@ -994,6 +1000,7 @@ def choose_output_size(
     size_profile: str,
     fixed_size: tuple[int, int],
     custom_sizes: Sequence[tuple[int, int]] | None,
+    size_jitter: float = 0.0,
 ) -> tuple[int, int]:
     if custom_sizes:
         candidates = list(custom_sizes)
@@ -1009,7 +1016,15 @@ def choose_output_size(
         matching = [size for size in candidates if (size[0] > size[1]) == is_landscape]
         if matching:
             candidates = matching
-    return random.choice(candidates)
+
+    width, height = random.choice(candidates)
+    # Jitter cung mot he so cho ca hai chieu de tang do da dang do phan giai
+    # ma khong lam thay doi ty le khung hinh hay keo meo document.
+    if not custom_sizes and size_profile == "realistic" and size_jitter > 0:
+        scale = random.uniform(1.0 - size_jitter, 1.0 + size_jitter)
+        width = max(1, round(width * scale))
+        height = max(1, round(height * scale))
+    return width, height
 
 
 def balanced_document_schedule(
@@ -1048,11 +1063,31 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--negative_probability", type=float, default=0.08)
     parser.add_argument("--stamp_probability", type=float, default=0.50)
     parser.add_argument("--stamp_overlap_probability", type=float, default=0.55)
-    parser.add_argument("--size_profile", choices=["native", "fixed", "realistic"], default="native")
+    parser.add_argument(
+        "--size_profile",
+        choices=["native", "fixed", "realistic"],
+        default="realistic",
+        help=(
+            "native=kich thuoc document goc; fixed=dung img_w/img_h; "
+            "realistic=lay ngau nhien nhieu do phan giai (mac dinh)"
+        ),
+    )
     parser.add_argument("--img_w", type=int, default=1191)
     parser.add_argument("--img_h", type=int, default=1685)
     parser.add_argument("--img_sizes", default=None,
-                        help="Danh sach kich thuoc WxH cach nhau boi dau phay; uu tien dung kich thuoc cung chieu document")
+                        help=(
+                            "Danh sach kich thuoc WxH cach nhau boi dau phay; ghi de size_profile "
+                            "va uu tien kich thuoc cung chieu document"
+                        ))
+    parser.add_argument(
+        "--size_jitter",
+        type=float,
+        default=0.12,
+        help=(
+            "Bien thien ty le quanh moi kich thuoc realistic, vi du 0.12 = +/-12%%; "
+            "khong ap dung cho native/fixed/img_sizes"
+        ),
+    )
     parser.add_argument("--no_geometry_aug", action="store_true")
     parser.add_argument("--no_scan_aug", action="store_true")
     parser.add_argument("--allow_fake_signatures", action="store_true",
@@ -1082,6 +1117,8 @@ def main() -> None:
         raise ValueError("Can 0 < --min_signatures <= --max_signatures")
     if args.img_w <= 0 or args.img_h <= 0:
         raise ValueError("--img_w va --img_h phai > 0")
+    if not 0 <= args.size_jitter < 1:
+        raise ValueError("--size_jitter phai nam trong khoang 0..<1")
     validate_probability(args.blue_ink_probability, "--blue_ink_probability")
     validate_probability(args.clean_signature_probability, "--clean_signature_probability")
     validate_probability(args.negative_probability, "--negative_probability")
@@ -1162,6 +1199,7 @@ def main() -> None:
     signature_label_count = 0
     stamp_label_count = 0
     scenario_counts: dict[str, int] = {}
+    output_size_counts: dict[tuple[int, int], int] = {}
 
     with manifest_path.open(manifest_mode, encoding="utf-8") as manifest:
         for index, document in enumerate(schedule):
@@ -1170,6 +1208,7 @@ def main() -> None:
                 args.size_profile,
                 (args.img_w, args.img_h),
                 custom_sizes,
+                args.size_jitter,
             )
             image, labels, metadata = compose_sample(
                 bg_size=output_size,
@@ -1196,6 +1235,7 @@ def main() -> None:
 
             signature_label_count += sum(label[0] == CLASS_SIGNATURE for label in labels)
             stamp_label_count += sum(label[0] == CLASS_STAMP for label in labels)
+            output_size_counts[image.size] = output_size_counts.get(image.size, 0) + 1
             scenario = metadata["scenario"]
             scenario_counts[scenario] = scenario_counts.get(scenario, 0) + 1
             metadata.update({
@@ -1223,6 +1263,20 @@ def main() -> None:
 
     print(f"Hoan tat: {output_root.resolve()}")
     print(f"Nhan signature: {signature_label_count}; stamp: {stamp_label_count}")
+    sorted_sizes = sorted(output_size_counts.items())
+    if len(sorted_sizes) <= 12:
+        size_details = ", ".join(
+            f"{width}x{height}={count}"
+            for (width, height), count in sorted_sizes
+        )
+    else:
+        widths = [width for (width, _), _ in sorted_sizes]
+        heights = [height for (_, height), _ in sorted_sizes]
+        size_details = (
+            f"width {min(widths)}..{max(widths)}, "
+            f"height {min(heights)}..{max(heights)}"
+        )
+    print(f"Kich thuoc dau ra: {len(output_size_counts)} kich thuoc khac nhau; {size_details}")
     print("Scenario: " + ", ".join(f"{name}={count}" for name, count in sorted(scenario_counts.items())))
     print(f"Manifest: {manifest_path}")
     print(
